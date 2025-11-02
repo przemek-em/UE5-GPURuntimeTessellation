@@ -1,0 +1,96 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	GPUVertexGeneration.usf: Compute shader for generating subdivided vertices
+	
+	This shader generates a tessellated grid of vertices from a base plane.
+	Replaces Hull Shader control point generation.
+	
+	For each output vertex in the grid:
+	- Calculate UV coordinates
+	- Generate position on XY plane
+	- Store base normal (up vector)
+	- Prepare for displacement pass
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Parameters
+uint ResolutionX;
+uint ResolutionY;
+float PlaneSizeX;
+float PlaneSizeY;
+float4x4 LocalToWorld;
+// Legacy parameter (not currently used - kept for compatibility)
+float3 PatchLocalOffset;
+// Per-patch UV offset and scale (for material UV continuity across patches)
+float2 PatchUVOffset;
+float2 PatchUVScale;
+
+// Input buffers (for triangle-based tessellation - not used in simple grid)
+StructuredBuffer<float3> InputVertices;
+StructuredBuffer<uint> InputIndices;
+StructuredBuffer<float> TessellationFactors;
+
+// Output buffers
+RWStructuredBuffer<float3> OutputPositions;
+RWStructuredBuffer<float3> OutputNormals;
+RWStructuredBuffer<float2> OutputUVs;
+
+/**
+ * Main compute shader entry point
+ * Generates a uniform grid of vertices
+ * Thread group: 8x8x1
+ */
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
+void GenerateVertices(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint x = ThreadId.x;
+	uint y = ThreadId.y;
+	
+	// Check bounds
+	if (x >= ResolutionX || y >= ResolutionY)
+		return;
+	
+	// Calculate vertex index
+	uint VertexIndex = y * ResolutionX + x;
+	
+	// Calculate local UV coordinates within this patch (0 to 1)
+	// Guard against any precision mishaps on boundary (ensure exact 0..1 range)
+	float u = saturate((float)x / max(1.0f, (float)(ResolutionX - 1)));
+	float v = saturate((float)y / max(1.0f, (float)(ResolutionY - 1)));
+	
+	// Remap to global UV coordinates for material continuity across patches
+	// Each patch shows its portion of the overall material
+	float2 GlobalUV = float2(u, v) * PatchUVScale + PatchUVOffset;
+	
+	// CRITICAL FIX: Generate position using patch UV coordinates within full plane space
+	// This ensures patches align correctly and displacement is consistent
+	// The full plane is PlaneSizeX x PlaneSizeY, centered at origin
+	// Each patch samples a region of this plane defined by PatchUVOffset and PatchUVScale
+	
+	// Convert patch-local UV (0-1) to position within the full plane
+	float2 PatchUV = float2(u, v) * PatchUVScale + PatchUVOffset;
+	
+	// Generate base position on XY plane using the FULL plane coordinates
+	// X = left/right, Y = forward/back, Z = up (for displacement)
+	// This matches UE5 standard orientation (Z-up coordinate system)
+	//
+	// IMPORTANT: LocalToWorld matrix (including scale) is applied later by the rendering pipeline
+	// via the primitive uniform buffer. We generate positions in UNSCALED local space here.
+	// The LocalToWorld passed to this shader is used only for reference/debugging.
+	float3 LocalPos = float3(
+		(PatchUV.x - 0.5) * PlaneSizeX,
+		(PatchUV.y - 0.5) * PlaneSizeY,
+		0.0
+	);
+	
+	// Base normal (up vector in local space - Z axis for XY ground plane)
+	// This will be transformed by the normal matrix (transpose of inverse of LocalToWorld)
+	float3 LocalNormal = float3(0, 0, 1);
+	
+	// Store results in LOCAL space (transform applied later in rendering)
+	OutputPositions[VertexIndex] = LocalPos;
+	OutputNormals[VertexIndex] = LocalNormal;
+	OutputUVs[VertexIndex] = GlobalUV;
+}

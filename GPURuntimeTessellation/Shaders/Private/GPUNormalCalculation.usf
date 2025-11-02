@@ -1,0 +1,276 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
+/*=============================================================================
+	GPUNormalCalculation.usf: Compute shader for calculating vertex normals
+	
+	This shader calculates normals from displaced geometry using:
+	1. Finite difference method on displacement texture (fast)
+	2. Geometry-based calculation from adjacent triangles (accurate)
+	3. Hybrid method (blends 1 and 2 based on smoothing factor)
+	4. From normal map texture (highest quality, pre-baked)
+	
+	Method 4 (From Normal Map):
+	- Samples pre-calculated normals from a normal map texture
+	- Best quality for high-resolution displacement
+	- No runtime calculation overhead
+	- Normal map should be in TANGENT SPACE (standard Unreal normal map format)
+	- For flat planes, tangent space aligns with world space (X=tangent, Y=bitangent, Z=normal)
+	- Supports standard material normal maps (BC5/DXT5 compressed)
+	
+	Supports multiple averaging methods:
+	- Angle-weighted (best quality)
+	- Area-weighted
+	- Uniform (fastest)
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Parameters
+uint NormalCalculationMethod; // 0=Disabled, 1=FiniteDiff, 2=GeometryBased, 3=Hybrid, 4=FromNormalMap
+float NormalSmoothingFactor;
+uint bInvertNormals;
+uint VertexCount;
+uint ResolutionX;
+uint ResolutionY;
+float TexelSize;
+float PlaneSizeX;
+float PlaneSizeY;
+
+// Displacement texture for gradient-based normals
+Texture2D<float> DisplacementTexture;
+SamplerState DisplacementSampler;
+float DisplacementIntensity;
+
+// Normal map texture (RGB = world space normal, optional)
+Texture2D NormalMapTexture;
+SamplerState NormalMapSampler;
+
+// Input buffers
+StructuredBuffer<float3> InputPositions;
+StructuredBuffer<float2> InputUVs;
+StructuredBuffer<uint> InputIndices;
+
+// Output buffer
+RWStructuredBuffer<float3> OutputNormals;
+
+/**
+ * Sample displacement for normal calculation
+ */
+float SampleDisplacementForNormal(float2 UV)
+{
+	return DisplacementTexture.SampleLevel(DisplacementSampler, UV, 0).r * DisplacementIntensity;
+}
+
+/**
+ * Calculate normal using finite difference on displacement texture
+ * Fast method for regular grids
+ * Works with XY ground plane where Z is up (UE5 standard)
+ */
+float3 CalculateNormalFiniteDifference(float2 UV, float PlaneSizeX, float PlaneSizeY)
+{
+	// Sample neighboring heights
+	float hL = SampleDisplacementForNormal(UV + float2(-TexelSize, 0));
+	float hR = SampleDisplacementForNormal(UV + float2(TexelSize, 0));
+	float hD = SampleDisplacementForNormal(UV + float2(0, -TexelSize));
+	float hU = SampleDisplacementForNormal(UV + float2(0, TexelSize));
+	
+	// Calculate world-space step sizes
+	float stepX = TexelSize * PlaneSizeX;
+	float stepY = TexelSize * PlaneSizeY;
+	
+	// Calculate tangent vectors in world space
+	// Tangent along X axis (left-right)
+	float3 tangentX = float3(2.0 * stepX, 0, hR - hL);
+	// Tangent along Y axis (forward-back) 
+	float3 tangentY = float3(0, 2.0 * stepY, hU - hD);
+	
+	// Cross product gives normal (Z-up coordinate system)
+	// For CCW winding (v0->v2->v1), we need X cross Y to get upward normal
+	float3 normal = cross(tangentX, tangentY);
+	return normalize(normal);
+}
+
+/**
+ * Calculate normal from grid topology
+ * Uses adjacent vertices in the grid
+ */
+float3 CalculateNormalFromGrid(uint x, uint y)
+{
+	uint VertexIndex = y * ResolutionX + x;
+	float3 Center = InputPositions[VertexIndex];
+	
+	float3 NormalSum = float3(0, 0, 0);
+	float WeightSum = 0.0;
+	
+	// Check all 4 adjacent quads (if they exist)
+	// Each vertex is part of up to 4 quads in a regular grid
+	
+	// Quad to the lower-left (if exists)
+	if (x > 0 && y > 0)
+	{
+		uint v0 = VertexIndex;
+		uint v1 = (y - 1) * ResolutionX + x;
+		uint v2 = (y - 1) * ResolutionX + (x - 1);
+		uint v3 = y * ResolutionX + (x - 1);
+		
+		float3 p0 = InputPositions[v0];
+		float3 p1 = InputPositions[v1];
+		float3 p2 = InputPositions[v2];
+		float3 p3 = InputPositions[v3];
+		
+		// Two triangles in this quad
+		float3 n1 = cross(p1 - p0, p3 - p0);
+		float3 n2 = cross(p3 - p0, p2 - p0);
+		
+		NormalSum += n1 + n2;
+		WeightSum += 2.0;
+	}
+	
+	// Quad to the lower-right (if exists)
+	if (x < ResolutionX - 1 && y > 0)
+	{
+		uint v0 = VertexIndex;
+		uint v1 = (y - 1) * ResolutionX + (x + 1);
+		uint v2 = (y - 1) * ResolutionX + x;
+		
+		float3 p0 = InputPositions[v0];
+		float3 p1 = InputPositions[v1];
+		float3 p2 = InputPositions[v2];
+		
+		float3 n1 = cross(p2 - p0, p1 - p0);
+		
+		NormalSum += n1;
+		WeightSum += 1.0;
+	}
+	
+	// Quad to the upper-right (if exists)
+	if (x < ResolutionX - 1 && y < ResolutionY - 1)
+	{
+		uint v0 = VertexIndex;
+		uint v1 = y * ResolutionX + (x + 1);
+		uint v2 = (y + 1) * ResolutionX + (x + 1);
+		uint v3 = (y + 1) * ResolutionX + x;
+		
+		float3 p0 = InputPositions[v0];
+		float3 p1 = InputPositions[v1];
+		float3 p2 = InputPositions[v2];
+		float3 p3 = InputPositions[v3];
+		
+		float3 n1 = cross(p1 - p0, p2 - p0);
+		float3 n2 = cross(p2 - p0, p3 - p0);
+		
+		NormalSum += n1 + n2;
+		WeightSum += 2.0;
+	}
+	
+	// Quad to the upper-left (if exists)
+	if (x > 0 && y < ResolutionY - 1)
+	{
+		uint v0 = VertexIndex;
+		uint v1 = (y + 1) * ResolutionX + x;
+		uint v2 = (y + 1) * ResolutionX + (x - 1);
+		
+		float3 p0 = InputPositions[v0];
+		float3 p1 = InputPositions[v1];
+		float3 p2 = InputPositions[v2];
+		
+		float3 n1 = cross(p1 - p0, p2 - p0);
+		
+		NormalSum += n1;
+		WeightSum += 1.0;
+	}
+	
+	// Average and normalize
+	if (WeightSum > 0.0)
+	{
+		return normalize(NormalSum / WeightSum);
+	}
+	
+	return float3(0, 0, 1); // Default up vector (Z-up for ground plane)
+}
+
+/**
+ * Main compute shader entry point
+ * One thread per vertex
+ */
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateNormals(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint VertexIndex = ThreadId.x;
+	
+	if (VertexIndex >= VertexCount)
+		return;
+	
+	float3 Normal;
+	
+	if (NormalCalculationMethod == 0)
+	{
+		// Disabled - use default up normal (Z-up for ground plane)
+		Normal = float3(0, 0, 1);
+	}
+	else if (NormalCalculationMethod == 4)
+	{
+		// Method 4: Sample from normal map texture (highest quality, pre-baked)
+		float2 UV = InputUVs[VertexIndex];
+		
+		// Sample normal map (RGB, stored as 0-1 range)
+		float4 NormalSample = NormalMapTexture.SampleLevel(NormalMapSampler, UV, 0);
+		
+		// Convert from 0-1 range to -1 to +1 range
+		float3 TangentNormal = NormalSample.rgb * 2.0 - 1.0;
+		
+		// IMPORTANT: Unreal uses OpenGL-style normal maps (Y+ = up in tangent space)
+		// For a flat plane (XY = ground, Z = up), the tangent space is:
+		// - Tangent: X-axis (right)
+		// - Bitangent: Y-axis (forward)  
+		// - Normal: Z-axis (up)
+		
+		// For a horizontal plane aligned with world axes, tangent space = world space
+		// So we can directly use the tangent-space normal as world-space normal
+		// (This is only true for flat, axis-aligned planes like our tessellated ground)
+		
+		// Transform from tangent space to world space
+		// For a flat XY plane: TangentX=(1,0,0), TangentY=(0,1,0), TangentZ=(0,0,1)
+		// Result: Normal = TangentNormal.x * (1,0,0) + TangentNormal.y * (0,1,0) + TangentNormal.z * (0,0,1)
+		//       = (TangentNormal.x, TangentNormal.y, TangentNormal.z)
+		Normal = TangentNormal;
+		
+		// Normalize to ensure unit length
+		Normal = normalize(Normal);
+	}
+	else
+	{
+		// Calculate grid coordinates
+		uint x = VertexIndex % ResolutionX;
+		uint y = VertexIndex / ResolutionX;
+		
+		// Primary method: finite difference (fast and accurate for regular grids)
+		float2 UV = InputUVs[VertexIndex];
+		float3 FiniteDiffNormal = CalculateNormalFiniteDifference(UV, PlaneSizeX, PlaneSizeY);
+		
+		// If smoothing is enabled, blend with geometry-based normal
+		if (NormalSmoothingFactor > 0.001)
+		{
+			float3 GeomNormal = CalculateNormalFromGrid(x, y);
+			
+			// Lerp between sharp (finite diff) and smooth (geometry-based)
+			// NormalSmoothingFactor = 0: Use finite difference only (sharp detail)
+			// NormalSmoothingFactor = 1: Use geometry-based only (smooth averaged)
+			Normal = lerp(FiniteDiffNormal, GeomNormal, NormalSmoothingFactor);
+		}
+		else
+		{
+			// No smoothing - use finite difference only
+			Normal = FiniteDiffNormal;
+		}
+	}
+	
+	// Invert if requested
+	if (bInvertNormals)
+	{
+		Normal = -Normal;
+	}
+	
+	// Store result
+	OutputNormals[VertexIndex] = normalize(Normal);
+}
