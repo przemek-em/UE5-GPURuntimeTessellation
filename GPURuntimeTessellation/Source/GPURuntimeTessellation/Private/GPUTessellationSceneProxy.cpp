@@ -49,8 +49,9 @@ FGPUTessellationSceneProxy::FGPUTessellationSceneProxy(UGPUTessellationComponent
 			UE_LOG(LogTemp, Warning, TEXT("  CalcBounds(Transform): %s"), *RecalcBounds.ToString());
 			UE_LOG(LogTemp, Warning, TEXT("  Transform Location: %s Scale: %s"), 
 				*ComponentTransform.GetLocation().ToString(), *ComponentTransform.GetScale3D().ToString());
+			const float TotalDisp = Settings.DisplacementIntensity + FMath::Abs(Settings.DisplacementOffset);
 			UE_LOG(LogTemp, Warning, TEXT("  Settings: PlaneSizeX:%.1f PlaneSizeY:%.1f Disp:%.1f"),
-				Settings.PlaneSizeX, Settings.PlaneSizeY, Settings.DisplacementIntensity + FMath::Abs(Settings.DisplacementOffset));
+				Settings.PlaneSizeX, Settings.PlaneSizeY, TotalDisp);
 		}
 	}
 	
@@ -117,9 +118,11 @@ FGPUTessellationSceneProxy::FGPUTessellationSceneProxy(UGPUTessellationComponent
 		
 		if (bEnableDebugLogging)
 		{
+			const int32 OriginalFactor = Settings.TessellationFactor;
+			const int32 MinFactor = Settings.MinTessellationFactor;
+			const int32 MaxFactor = Settings.MaxTessellationFactor;
 			UE_LOG(LogTemp, Warning, TEXT("GPUTessellation: SceneProxy using LOD-adjusted TessellationFactor: %d (Original: %d, Min: %d, Max: %d)"),
-				Component->LastAppliedTessFactor, Settings.TessellationFactor, 
-				Settings.MinTessellationFactor, Settings.MaxTessellationFactor);
+				Component->LastAppliedTessFactor, OriginalFactor, MinFactor, MaxFactor);
 		}
 	}
 	

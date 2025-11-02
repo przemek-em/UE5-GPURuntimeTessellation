@@ -6,10 +6,9 @@
 #include "PrimitiveSceneProxy.h"
 #include "GPUTessellationMeshBuilder.h"
 #include "GPUTessellationVertexFactory.h"
+#include "GPUTessellationComponent.h"
 
-class UGPUTessellationComponent;
 class FMaterialRenderProxy;
-struct FGPUTessellationSettings;
 
 /**
  * Dynamic data for patch updates (camera position)

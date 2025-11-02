@@ -1025,19 +1025,16 @@ int32 FGPUTessellationMeshBuilder::CalculatePatchTessellationLevel(
 	if (!bLoggedConfig)
 	{
 		bLoggedConfig = true;
-		UE_LOG(LogTemp, Warning, TEXT("Patch LOD Config: %d levels, %d distances"), 
-			Settings.PatchLevels.Num(), Settings.PatchDistances.Num());
-		for (int32 i = 0; i < FMath::Min(Settings.PatchLevels.Num(), Settings.PatchDistances.Num()); ++i)
-		{
-			UE_LOG(LogTemp, Warning, TEXT("  LOD[%d]: Distance <= %.1f uses Level %d (Tess=%d)"), 
-				i, 
-				Settings.PatchDistances[i], 
-				static_cast<int32>(Settings.PatchLevels[i]),
-				ConvertPatchLevelToTessellation(Settings.PatchLevels[i]));
-		}
+	UE_LOG(LogTemp, Warning, TEXT("Patch LOD Config: %d levels, %d distances"), 
+		Settings.PatchLevels.Num(), Settings.PatchDistances.Num());
+	for (int32 i = 0; i < FMath::Min(Settings.PatchLevels.Num(), Settings.PatchDistances.Num()); ++i)
+	{
+		const int32 LevelInt = static_cast<int32>(Settings.PatchLevels[i]);
+		const int32 TessInt = ConvertPatchLevelToTessellation(Settings.PatchLevels[i]);
+		UE_LOG(LogTemp, Warning, TEXT("  LOD[%d]: Distance <= %.1f uses Level %d (Tess=%d)"), 
+			i, Settings.PatchDistances[i], LevelInt, TessInt);
 	}
-	
-	// CORRECT LOGIC: Find which distance bracket we fall into
+}	// CORRECT LOGIC: Find which distance bracket we fall into
 	// PatchDistances should be ordered from smallest to largest
 	// PatchLevels should be ordered from highest quality to lowest
 	//
