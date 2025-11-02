@@ -55,6 +55,33 @@ For project-specific installation:
 
 **Note**: Engine plugins (Option A) are not packaged with your project. For distribution, use Option B or ensure target systems have the plugin in their engine installation.
 
+
+## Known build issues
+
+- Build errors when compiling the plugin with the Epic Games Launcher UE 5.6
+  that did not appear when compiling with a locally source-built UE 5.6.
+- Compiler errors referencing `UE::Core::Private::FormatStringSan`, template
+  format validation, or `ArgumentNullException` from UnrealBuildTool when
+  loading module rules.
+- Runtime: shadows not appearing when using Virtual Shadow Maps (they work
+  when switching to standard shadow maps).
+
+## Root Causes
+
+1. Stricter format-string validation and constexpr checks were added in the
+   Epic-built engine toolchain. `UE_LOG` calls containing non-constexpr
+   expressions triggered compile-time template errors when the log format
+   sanitizer attempted to validate arguments.
+
+2. Forward declarations for types like `FGPUTessellationSettings` were
+   insufficient in some headers; the launcher build required full includes in
+   order to resolve types at the point of module rule evaluation.
+
+3. Virtual Shadow Maps (VSM) differ from standard shadowmap rendering paths;
+   the plugin's dynamic GPU mesh generation and vertex factory expectations
+   are currently validated against the standard shadowmap rendering path.
+
+
 ### Basic Usage (C++)
 
 ```cpp
@@ -422,6 +449,7 @@ All buffers are created by compute shaders and **never leave GPU memory** - ensu
 - [ ] GPU-driven autonomous LOD (move LOD calculations to GPU)
 - [ ] Automatic water/ocean simulation
 - [ ] Seamless improvement for patch system
+- [ ] Virtual Shadow Maps integration
 
 ---
 
