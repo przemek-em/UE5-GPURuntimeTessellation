@@ -409,6 +409,7 @@ TessComp->bShowPatchDebugVisualization = true;  // Editor only
    - Calculates normals using chosen method
    - Supports finite difference, geometry-based, hybrid, and normal map
    - Thread group: 64×1×1
+NOTE: The vertex factory uses a simplified tangent basis (axis-aligned) for performance. Normal maps expect tangents that follow UV gradients on the displaced surface. This mismatch causes distortion. Use geometric normals instead (uncheck "Tangent Space Normal" in material).
 
 4. **Tangent Calculation** (`GPUTangentCalculation.usf`)
    - Generates tangent space for normal mapping
@@ -451,6 +452,7 @@ All buffers are created by compute shaders and **never leave GPU memory** - ensu
 - [ ] Support for arbitrary base meshes
 - [ ] GPU-driven autonomous LOD (move LOD calculations to GPU)
 - [ ] Automatic water/ocean simulation
+- [ ] Optional Subdivision
 
 ---
 
@@ -465,7 +467,7 @@ This is an experimental plugin. Contributions, issues, and feature requests are 
 This project is licensed under the MIT License.
 
 Some parts of the code were generated with assistance from AI tools (e.g., Github Copilot - Anthropic Claude 4.5 / OpenAI GPT-5).
-All generated content was reviewed, tested, and integrated by the author.
+Note: This plugin is still highly experimental and definitely not production ready.
 
 ---
 
