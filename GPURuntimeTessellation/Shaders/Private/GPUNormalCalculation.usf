@@ -41,6 +41,11 @@ Texture2D<float> DisplacementTexture;
 SamplerState DisplacementSampler;
 float DisplacementIntensity;
 
+// Subtract/mask texture (for correct normal calculation with RVT)
+uint bHasSubtractTexture;
+Texture2D SubtractTexture;
+SamplerState SubtractSampler;
+
 // Normal map texture (RGB = world space normal, optional)
 Texture2D NormalMapTexture;
 SamplerState NormalMapSampler;
@@ -55,10 +60,20 @@ RWStructuredBuffer<float3> OutputNormals;
 
 /**
  * Sample displacement for normal calculation
+ * Applies subtract/mask texture if present (same logic as displacement shader)
  */
 float SampleDisplacementForNormal(float2 UV)
 {
-	return DisplacementTexture.SampleLevel(DisplacementSampler, UV, 0).r * DisplacementIntensity;
+	float Height = DisplacementTexture.SampleLevel(DisplacementSampler, UV, 0).r * DisplacementIntensity;
+	
+	// Apply subtract/mask texture if present (same as displacement shader)
+	if (bHasSubtractTexture)
+	{
+		float Mask = SubtractTexture.SampleLevel(SubtractSampler, UV, 0).r;
+		Height *= (1.0 - Mask); // White mask = no displacement
+	}
+	
+	return Height;
 }
 
 /**

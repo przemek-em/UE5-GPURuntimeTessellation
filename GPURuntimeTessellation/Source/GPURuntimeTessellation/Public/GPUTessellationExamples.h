@@ -204,8 +204,8 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Tessellation")
 	void SetTessellationTextures(
 		AActor* TargetActor,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* SubtractTexture)
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture)
 	{
 		if (!TargetActor) return;
 

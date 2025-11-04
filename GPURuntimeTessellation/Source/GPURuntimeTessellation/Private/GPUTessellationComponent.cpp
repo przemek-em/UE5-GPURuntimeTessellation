@@ -5,6 +5,7 @@
 #include "GPUTessellationMeshBuilder.h"
 #include "Materials/MaterialInterface.h"
 #include "Engine/Texture2D.h"
+#include "Engine/TextureRenderTarget.h"
 #include "PrimitiveSceneProxy.h"
 #include "RenderingThread.h"
 #include "GameFramework/PlayerController.h"
@@ -115,6 +116,53 @@ void UGPUTessellationComponent::TickComponent(float DeltaTime, enum ELevelTick T
 			// No LOD - use TessellationFactor directly via CalculateGridResolution()
 			break;
 	}
+	
+	// Check if any textures are render targets (dynamic textures that update every frame)
+	// If so, force mesh regeneration every frame to reflect the changes (with optional FPS limiting)
+	if (bAutoUpdateRenderTargets)
+	{
+		bool bHasRenderTarget = false;
+		
+		if (DisplacementTexture && DisplacementTexture->IsA<UTextureRenderTarget>())
+		{
+			bHasRenderTarget = true;
+		}
+		if (SubtractTexture && SubtractTexture->IsA<UTextureRenderTarget>())
+		{
+			bHasRenderTarget = true;
+		}
+		if (NormalMapTexture && NormalMapTexture->IsA<UTextureRenderTarget>())
+		{
+			bHasRenderTarget = true;
+		}
+		
+		// Force update when using render targets, with optional FPS limiting
+		if (bHasRenderTarget)
+		{
+			bool bShouldUpdate = true;
+			
+			// Apply FPS limiting if specified (0 = unlimited)
+			if (RenderTargetUpdateFPS > 0)
+			{
+				double CurrentTime = FPlatformTime::Seconds();
+				double MinTimeBetweenUpdates = 1.0 / static_cast<double>(RenderTargetUpdateFPS);
+				
+				if (CurrentTime - LastRenderTargetUpdateTime < MinTimeBetweenUpdates)
+				{
+					bShouldUpdate = false;
+				}
+				else
+				{
+					LastRenderTargetUpdateTime = CurrentTime;
+				}
+			}
+			
+			if (bShouldUpdate)
+			{
+				MarkRenderStateDirty();
+			}
+		}
+	}
 }
 
 FPrimitiveSceneProxy* UGPUTessellationComponent::CreateSceneProxy()
@@ -217,19 +265,19 @@ void UGPUTessellationComponent::UpdateTessellatedMesh()
 	MarkRenderStateDirty();
 }
 
-void UGPUTessellationComponent::SetDisplacementTexture(UTexture2D* InTexture)
+void UGPUTessellationComponent::SetDisplacementTexture(UTexture* InTexture)
 {
 	DisplacementTexture = InTexture;
 	UpdateTessellatedMesh();
 }
 
-void UGPUTessellationComponent::SetSubtractTexture(UTexture2D* InTexture)
+void UGPUTessellationComponent::SetSubtractTexture(UTexture* InTexture)
 {
 	SubtractTexture = InTexture;
 	UpdateTessellatedMesh();
 }
 
-void UGPUTessellationComponent::SetNormalMapTexture(UTexture2D* InTexture)
+void UGPUTessellationComponent::SetNormalMapTexture(UTexture* InTexture)
 {
 	NormalMapTexture = InTexture;
 	UpdateTessellatedMesh();

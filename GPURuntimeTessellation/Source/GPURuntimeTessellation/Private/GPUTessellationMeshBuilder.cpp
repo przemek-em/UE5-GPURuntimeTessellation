@@ -46,9 +46,9 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	const FGPUTessellationSettings& Settings,
 	const FMatrix& LocalToWorld,
 	const FVector& CameraPosition,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* SubtractTexture,
-	UTexture2D* NormalMapTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
+	UTexture* NormalMapTexture,
 	FGPUTessellatedMeshData& OutMeshData)
 {
 	// Calculate resolution
@@ -72,7 +72,7 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	// Step 3: Calculate normals (if enabled)
 	if (Settings.NormalCalculationMethod != EGPUTessellationNormalMethod::Disabled)
 	{
-		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
+		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 
 	// Step 4: Generate indices
@@ -86,8 +86,8 @@ void FGPUTessellationMeshBuilder::GenerateMeshSync(
 	const FGPUTessellationSettings& Settings,
 	const FMatrix& LocalToWorld,
 	const FVector& CameraPosition,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* RVTMaskTexture,
+	UTexture* DisplacementTexture,
+	UTexture* RVTMaskTexture,
 	FGPUTessellatedMeshData& OutMeshData)
 {
 	ENQUEUE_RENDER_COMMAND(GenerateTessellatedMesh)(
@@ -196,8 +196,8 @@ void FGPUTessellationMeshBuilder::DispatchDisplacement(
 	FRDGBuilder& GraphBuilder,
 	const FGPUTessellationSettings& Settings,
 	FIntPoint Resolution,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* SubtractTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
 	FRDGBufferRef VertexBuffer,
 	FRDGBufferRef NormalBuffer,
 	FRDGBufferRef UVBuffer)
@@ -206,11 +206,11 @@ void FGPUTessellationMeshBuilder::DispatchDisplacement(
 
 	// Get or create textures
 	FRDGTextureRef DisplacementTextureRDG = DisplacementTexture ? 
-		CreateRDGTextureFromUTexture2D(GraphBuilder, DisplacementTexture, TEXT("DisplacementTexture")) :
+		CreateRDGTextureFromUTexture(GraphBuilder, DisplacementTexture, TEXT("DisplacementTexture")) :
 		GetDefaultWhiteTexture(GraphBuilder);
 
 	FRDGTextureRef SubtractTextureRDG = SubtractTexture ?
-		CreateRDGTextureFromUTexture2D(GraphBuilder, SubtractTexture, TEXT("SubtractTexture")) :
+		CreateRDGTextureFromUTexture(GraphBuilder, SubtractTexture, TEXT("SubtractTexture")) :
 		GetDefaultWhiteTexture(GraphBuilder);
 
 	// Setup shader parameters
@@ -253,8 +253,9 @@ void FGPUTessellationMeshBuilder::DispatchNormalCalculation(
 	FRDGBuilder& GraphBuilder,
 	const FGPUTessellationSettings& Settings,
 	FIntPoint Resolution,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* NormalMapTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
+	UTexture* NormalMapTexture,
 	FRDGBufferRef VertexBuffer,
 	FRDGBufferRef NormalBuffer,
 	FRDGBufferRef UVBuffer)
@@ -263,12 +264,17 @@ void FGPUTessellationMeshBuilder::DispatchNormalCalculation(
 
 	// Get displacement texture
 	FRDGTextureRef DisplacementTextureRDG = DisplacementTexture ?
-		CreateRDGTextureFromUTexture2D(GraphBuilder, DisplacementTexture, TEXT("DisplacementTexture")) :
+		CreateRDGTextureFromUTexture(GraphBuilder, DisplacementTexture, TEXT("DisplacementTexture")) :
+		GetDefaultWhiteTexture(GraphBuilder);
+
+	// Get subtract/mask texture (NEW - for correct normal calculation)
+	FRDGTextureRef SubtractTextureRDG = SubtractTexture ?
+		CreateRDGTextureFromUTexture(GraphBuilder, SubtractTexture, TEXT("SubtractTexture")) :
 		GetDefaultWhiteTexture(GraphBuilder);
 
 	// Get normal map texture (optional - only used when NormalCalculationMethod == FromNormalMap)
 	FRDGTextureRef NormalMapTextureRDG = NormalMapTexture ?
-		CreateRDGTextureFromUTexture2D(GraphBuilder, NormalMapTexture, TEXT("NormalMapTexture")) :
+		CreateRDGTextureFromUTexture(GraphBuilder, NormalMapTexture, TEXT("NormalMapTexture")) :
 		GetDefaultWhiteTexture(GraphBuilder);
 
 	// Dummy index buffer for normal calculation (not actually used in grid-based normals)
@@ -295,6 +301,11 @@ void FGPUTessellationMeshBuilder::DispatchNormalCalculation(
 	// Use Bilinear sampling with Clamp addressing to avoid edge wrapping artifacts
 	PassParameters->DisplacementSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	PassParameters->DisplacementIntensity = Settings.DisplacementIntensity;
+	// Subtract/mask texture parameters (NEW - for correct normals with RVT)
+	PassParameters->bHasSubtractTexture = (SubtractTexture != nullptr) ? 1 : 0;
+	PassParameters->SubtractTexture = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(SubtractTextureRDG));
+	PassParameters->SubtractSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
+	// Normal map texture parameters
 	PassParameters->NormalMapTexture = GraphBuilder.CreateSRV(FRDGTextureSRVDesc::Create(NormalMapTextureRDG));
 	PassParameters->NormalMapSampler = TStaticSamplerState<SF_Bilinear, AM_Clamp, AM_Clamp, AM_Clamp>::GetRHI();
 	PassParameters->InputPositions = GraphBuilder.CreateSRV(VertexBuffer);
@@ -440,9 +451,9 @@ void FGPUTessellationMeshBuilder::ExtractMeshData(
 		});
 }
 
-FRDGTextureRef FGPUTessellationMeshBuilder::CreateRDGTextureFromUTexture2D(
+FRDGTextureRef FGPUTessellationMeshBuilder::CreateRDGTextureFromUTexture(
 	FRDGBuilder& GraphBuilder,
-	UTexture2D* Texture,
+	UTexture* Texture,
 	const TCHAR* Name)
 {
 	if (!Texture || !Texture->GetResource())
@@ -467,9 +478,9 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	const FGPUTessellationSettings& Settings,
 	const FMatrix& LocalToWorld,
 	const FVector& CameraPosition,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* SubtractTexture,
-	UTexture2D* NormalMapTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
+	UTexture* NormalMapTexture,
 	FGPUTessellationBuffers& OutGPUBuffers)
 {
 	// Calculate resolution
@@ -493,7 +504,7 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	// Step 3: Calculate normals (if enabled)
 	if (Settings.NormalCalculationMethod != EGPUTessellationNormalMethod::Disabled)
 	{
-		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
+		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 
 	// Step 4: Generate indices
@@ -589,9 +600,9 @@ void FGPUTessellationMeshBuilder::ExecutePatchTessellationPipeline(
 	const FConvexVolume* ViewFrustum,
 	int32 PatchCountX,
 	int32 PatchCountY,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* SubtractTexture,
-	UTexture2D* NormalMapTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
+	UTexture* NormalMapTexture,
 	FGPUTessellationPatchBuffers& OutPatchBuffers)
 {
 	check(PatchCountX > 0 && PatchCountY > 0);
@@ -687,9 +698,9 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	const FVector2f& PatchUVOffset,
 	const FVector2f& PatchUVSize,
 	int32 TessellationLevel,
-	UTexture2D* DisplacementTexture,
-	UTexture2D* SubtractTexture,
-	UTexture2D* NormalMapTexture,
+	UTexture* DisplacementTexture,
+	UTexture* SubtractTexture,
+	UTexture* NormalMapTexture,
 	FGPUTessellationBuffers& OutPatchBuffers)
 {
 	// Validate tessellation level first
@@ -815,7 +826,7 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	// Step 3: Calculate normals if enabled (also use patch settings for consistent plane size)
 	if (Settings.NormalCalculationMethod != EGPUTessellationNormalMethod::Disabled)
 	{
-		DispatchNormalCalculation(GraphBuilder, PatchSettings, Resolution, DisplacementTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
+		DispatchNormalCalculation(GraphBuilder, PatchSettings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 	
 	// Step 4: Generate indices

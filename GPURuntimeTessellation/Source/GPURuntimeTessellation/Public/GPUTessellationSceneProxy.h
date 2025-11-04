@@ -83,9 +83,9 @@ private:
 
 	/** Cached transforms and textures for patch regeneration */
 	FMatrix CachedLocalToWorld;
-	TObjectPtr<UTexture2D> CachedDisplacementTexture;
-	TObjectPtr<UTexture2D> CachedSubtractTexture;
-	TObjectPtr<UTexture2D> CachedNormalMapTexture;
+	TObjectPtr<UTexture> CachedDisplacementTexture;
+	TObjectPtr<UTexture> CachedSubtractTexture;
+	TObjectPtr<UTexture> CachedNormalMapTexture;
 
 	/** GPU buffers (persistent, no CPU copy) - for single mesh mode */
 	mutable FGPUTessellationBuffers GPUBuffers;

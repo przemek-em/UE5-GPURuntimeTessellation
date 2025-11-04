@@ -170,6 +170,11 @@ public:
 		SHADER_PARAMETER_SAMPLER(SamplerState, DisplacementSampler)
 		SHADER_PARAMETER(float, DisplacementIntensity)
 		
+		// Subtract/mask texture (for correct normal calculation with RVT)
+		SHADER_PARAMETER(uint32, bHasSubtractTexture)
+		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, SubtractTexture)
+		SHADER_PARAMETER_SAMPLER(SamplerState, SubtractSampler)
+		
 		// Normal map texture (RGB = world space normal)
 		SHADER_PARAMETER_RDG_TEXTURE_SRV(Texture2D, NormalMapTexture)
 		SHADER_PARAMETER_SAMPLER(SamplerState, NormalMapSampler)

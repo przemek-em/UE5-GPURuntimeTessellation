@@ -207,9 +207,9 @@ public:
 	 * @param Settings - Tessellation settings
 	 * @param LocalToWorld - Transform matrix
 	 * @param CameraPosition - Camera position for LOD
-	 * @param DisplacementTexture - Optional displacement texture
-	 * @param RVTMaskTexture - Optional RVT mask texture
-	 * @param NormalMapTexture - Optional normal map texture
+	 * @param DisplacementTexture - Optional displacement texture (supports UTexture2D and UTextureRenderTarget2D)
+	 * @param RVTMaskTexture - Optional RVT mask texture (supports UTexture2D and UTextureRenderTarget2D)
+	 * @param NormalMapTexture - Optional normal map texture (supports UTexture2D and UTextureRenderTarget2D)
 	 * @param OutMeshData - Generated mesh data (filled after GPU execution completes)
 	 */
 	void ExecuteTessellationPipeline(
@@ -217,9 +217,9 @@ public:
 		const FGPUTessellationSettings& Settings,
 		const FMatrix& LocalToWorld,
 		const FVector& CameraPosition,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* RVTMaskTexture,
-		UTexture2D* NormalMapTexture,
+		UTexture* DisplacementTexture,
+		UTexture* RVTMaskTexture,
+		UTexture* NormalMapTexture,
 		FGPUTessellatedMeshData& OutMeshData);
 
 	/**
@@ -230,9 +230,9 @@ public:
 	 * @param Settings - Tessellation settings
 	 * @param LocalToWorld - Transform matrix
 	 * @param CameraPosition - Camera position for LOD
-	 * @param DisplacementTexture - Optional displacement texture
-	 * @param SubtractTexture - Optional subtract/mask texture (supports RenderTargets for realtime painting)
-	 * @param NormalMapTexture - Optional normal map texture
+	 * @param DisplacementTexture - Optional displacement texture (supports UTexture2D and UTextureRenderTarget2D)
+	 * @param SubtractTexture - Optional subtract/mask texture (supports UTexture2D and UTextureRenderTarget2D for realtime painting)
+	 * @param NormalMapTexture - Optional normal map texture (supports UTexture2D and UTextureRenderTarget2D)
 	 * @param OutGPUBuffers - GPU buffer references (no CPU copy)
 	 */
 	void ExecuteTessellationPipeline(
@@ -240,9 +240,9 @@ public:
 		const FGPUTessellationSettings& Settings,
 		const FMatrix& LocalToWorld,
 		const FVector& CameraPosition,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* SubtractTexture,
-		UTexture2D* NormalMapTexture,
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture,
+		UTexture* NormalMapTexture,
 		FGPUTessellationBuffers& OutGPUBuffers);
 
 	/**
@@ -256,9 +256,9 @@ public:
 	 * @param ViewFrustum - View frustum for per-patch culling
 	 * @param PatchCountX - Number of patches in X direction
 	 * @param PatchCountY - Number of patches in Y direction
-	 * @param DisplacementTexture - Optional displacement texture
-	 * @param SubtractTexture - Optional subtract/mask texture
-	 * @param NormalMapTexture - Optional normal map texture
+	 * @param DisplacementTexture - Optional displacement texture (supports UTexture2D and UTextureRenderTarget2D)
+	 * @param SubtractTexture - Optional subtract/mask texture (supports UTexture2D and UTextureRenderTarget2D)
+	 * @param NormalMapTexture - Optional normal map texture (supports UTexture2D and UTextureRenderTarget2D)
 	 * @param OutPatchBuffers - GPU buffer references for all patches (no CPU copy)
 	 */
 	void ExecutePatchTessellationPipeline(
@@ -269,9 +269,9 @@ public:
 		const FConvexVolume* ViewFrustum,
 		int32 PatchCountX,
 		int32 PatchCountY,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* SubtractTexture,
-		UTexture2D* NormalMapTexture,
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture,
+		UTexture* NormalMapTexture,
 		FGPUTessellationPatchBuffers& OutPatchBuffers);
 
 	/**
@@ -282,8 +282,8 @@ public:
 		const FGPUTessellationSettings& Settings,
 		const FMatrix& LocalToWorld,
 		const FVector& CameraPosition,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* RVTMaskTexture,
+		UTexture* DisplacementTexture,
+		UTexture* RVTMaskTexture,
 		FGPUTessellatedMeshData& OutMeshData);
 
 private:
@@ -312,8 +312,8 @@ private:
 		FRDGBuilder& GraphBuilder,
 		const FGPUTessellationSettings& Settings,
 		FIntPoint Resolution,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* SubtractTexture,
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture,
 		FRDGBufferRef VertexBuffer,
 		FRDGBufferRef NormalBuffer,
 		FRDGBufferRef UVBuffer);
@@ -325,8 +325,9 @@ private:
 		FRDGBuilder& GraphBuilder,
 		const FGPUTessellationSettings& Settings,
 		FIntPoint Resolution,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* NormalMapTexture,
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture,
+		UTexture* NormalMapTexture,
 		FRDGBufferRef VertexBuffer,
 		FRDGBufferRef NormalBuffer,
 		FRDGBufferRef UVBuffer);
@@ -363,11 +364,11 @@ private:
 		FGPUTessellatedMeshData& OutMeshData);
 
 	/**
-	 * Create RDG texture from UTexture2D
+	 * Create RDG texture from UTexture (supports both UTexture2D and UTextureRenderTarget2D)
 	 */
-	FRDGTextureRef CreateRDGTextureFromUTexture2D(
+	FRDGTextureRef CreateRDGTextureFromUTexture(
 		FRDGBuilder& GraphBuilder,
-		UTexture2D* Texture,
+		UTexture* Texture,
 		const TCHAR* Name);
 
 	/**
@@ -385,9 +386,9 @@ private:
 		const FVector2f& PatchUVOffset,
 		const FVector2f& PatchUVSize,
 		int32 TessellationLevel,
-		UTexture2D* DisplacementTexture,
-		UTexture2D* SubtractTexture,
-		UTexture2D* NormalMapTexture,
+		UTexture* DisplacementTexture,
+		UTexture* SubtractTexture,
+		UTexture* NormalMapTexture,
 		FGPUTessellationBuffers& OutPatchBuffers);
 
 	/**

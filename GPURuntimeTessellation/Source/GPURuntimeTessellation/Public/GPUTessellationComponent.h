@@ -227,17 +227,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation")
 	FGPUTessellationSettings TessellationSettings;
 
-	/** Displacement texture (R channel = height) */
+	/** Displacement texture (R channel = height) - Supports both UTexture2D and UTextureRenderTarget2D */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation")
-	TObjectPtr<UTexture2D> DisplacementTexture;
+	TObjectPtr<UTexture> DisplacementTexture;
 
-	/** Subtract/Mask texture (optional) - Texture mask where white = no displacement, black = full displacement. Use RenderTarget for realtime effects like snow melting. */
+	/** Subtract/Mask texture (optional) - Texture mask where white = no displacement, black = full displacement. Supports both UTexture2D and UTextureRenderTarget2D for realtime effects like snow melting. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation")
-	TObjectPtr<UTexture2D> SubtractTexture;
+	TObjectPtr<UTexture> SubtractTexture;
 
-	/** Normal map texture (RGB = tangent space normal, optional - used when NormalCalculationMethod = FromNormalMap) */
+	/** Normal map texture (RGB = tangent space normal, optional - used when NormalCalculationMethod = FromNormalMap) - Supports both UTexture2D and UTextureRenderTarget2D */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation", meta = (EditCondition = "TessellationSettings.NormalCalculationMethod == 4", EditConditionHides))
-	TObjectPtr<UTexture2D> NormalMapTexture;
+	TObjectPtr<UTexture> NormalMapTexture;
 
 	/** Material to render the tessellated mesh */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation")
@@ -246,6 +246,14 @@ public:
 	/** Enable automatic updates based on camera movement */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation")
 	bool bAutoUpdate = true;
+
+	/** Enable automatic updates for render target textures - Updates mesh every frame when render targets are used */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation|Render Target")
+	bool bAutoUpdateRenderTargets = true;
+
+	/** Limit render target update rate (FPS) - 0 means unlimited (update every frame) */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation|Render Target", meta = (ClampMin = "0", ClampMax = "120", UIMin = "0", UIMax = "120", EditCondition = "bAutoUpdateRenderTargets", EditConditionHides))
+	int32 RenderTargetUpdateFPS = 60;
 
 	/** Enable debug logging (throttled to every 2 seconds) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "GPU Tessellation|Debug")
@@ -262,15 +270,15 @@ public:
 
 	/** Set displacement texture */
 	UFUNCTION(BlueprintCallable, Category = "GPU Tessellation")
-	void SetDisplacementTexture(UTexture2D* InTexture);
+	void SetDisplacementTexture(UTexture* InTexture);
 
 	/** Set subtract/mask texture (accepts regular textures or RenderTargets for realtime painting) */
 	UFUNCTION(BlueprintCallable, Category = "GPU Tessellation")
-	void SetSubtractTexture(UTexture2D* InTexture);
+	void SetSubtractTexture(UTexture* InTexture);
 
 	/** Set normal map texture */
 	UFUNCTION(BlueprintCallable, Category = "GPU Tessellation")
-	void SetNormalMapTexture(UTexture2D* InTexture);
+	void SetNormalMapTexture(UTexture* InTexture);
 
 	/** Set material (overrides parent method) */
 	virtual void SetMaterial(int32 ElementIndex, UMaterialInterface* InMaterial) override;
@@ -336,6 +344,9 @@ private:
 
 	/** Last log time for throttling */
 	mutable double LastLogTime = 0.0;
+
+	/** Last render target update time for FPS limiting */
+	double LastRenderTargetUpdateTime = 0.0;
 
 	/** Last patch configuration for change detection (Instance-specific, not static!) */
 	int32 LastPatchCountX = 1;
