@@ -506,7 +506,7 @@ Note: This plugin is still highly experimental and definitely not production rea
 
 ## Acknowledgments
 
-Built for Unreal Engine 5.6.0 as an experimental plugin demonstrating  compute shader-based tessellation as a replacement for traditional Hull/Domain shader pipelines.
+Built for Unreal Engine 5.6.1 as an experimental plugin demonstrating  compute shader-based tessellation as a replacement for traditional Hull/Domain shader pipelines.
 
 ---
 ### Screenshots
