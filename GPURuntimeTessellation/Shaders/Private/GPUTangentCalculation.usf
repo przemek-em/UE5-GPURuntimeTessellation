@@ -1,0 +1,106 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+/*=============================================================================
+	GPUTangentCalculation.usf: Compute shader for calculating tangent basis
+	Calculates proper tangent/binormal aligned with UV coordinates for normal mapping
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Input parameters
+uint ResolutionX;
+uint ResolutionY;
+uint VertexCount;
+float PlaneSizeX;
+float PlaneSizeY;
+
+// Input buffers
+StructuredBuffer<float3> InputPositions;
+StructuredBuffer<float3> InputNormals;
+StructuredBuffer<float2> InputUVs;
+
+// Output buffer
+RWStructuredBuffer<float4> OutputTangents;  // xyz = tangent, w = binormal sign
+
+[numthreads(64, 1, 1)]
+void CalculateTangentsCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint VertexIndex = DispatchThreadId.x;
+	
+	if (VertexIndex >= VertexCount)
+	{
+		return;
+	}
+	
+	// Get current vertex data
+	float3 Position = InputPositions[VertexIndex];
+	float3 Normal = normalize(InputNormals[VertexIndex]);
+	float2 UV = InputUVs[VertexIndex];
+	
+	// Calculate grid coordinates
+	uint x = VertexIndex % ResolutionX;
+	uint y = VertexIndex / ResolutionX;
+	
+	// Default tangent and binormal
+	float3 Tangent = float3(1, 0, 0);
+	float3 Binormal = float3(0, 1, 0);
+	
+	// Calculate tangent from position/UV derivatives (aligned with UV space)
+	// This ensures normal maps work correctly
+	
+	if (x > 0 && x < ResolutionX - 1 && y > 0 && y < ResolutionY - 1)
+	{
+		// Get neighboring vertices for derivative calculation
+		uint idxRight = VertexIndex + 1;
+		uint idxLeft = VertexIndex - 1;
+		uint idxUp = VertexIndex + ResolutionX;
+		uint idxDown = VertexIndex - ResolutionX;
+		
+		float3 PosRight = InputPositions[idxRight];
+		float3 PosLeft = InputPositions[idxLeft];
+		float3 PosUp = InputPositions[idxUp];
+		float3 PosDown = InputPositions[idxDown];
+		
+		float2 UVRight = InputUVs[idxRight];
+		float2 UVLeft = InputUVs[idxLeft];
+		float2 UVUp = InputUVs[idxUp];
+		float2 UVDown = InputUVs[idxDown];
+		
+		// Calculate position derivatives
+		float3 dPdU = (PosRight - PosLeft) / (UVRight.x - UVLeft.x + 0.0001);
+		float3 dPdV = (PosUp - PosDown) / (UVUp.y - UVDown.y + 0.0001);
+		
+		// These derivatives are our tangent and binormal in UV space
+		Tangent = normalize(dPdU);
+		Binormal = normalize(dPdV);
+		
+		// Orthogonalize tangent to normal (Gram-Schmidt)
+		Tangent = normalize(Tangent - Normal * dot(Normal, Tangent));
+		
+		// Recalculate binormal to ensure orthogonal basis
+		Binormal = cross(Normal, Tangent);
+	}
+	else
+	{
+		// Edge vertices - use simplified calculation
+		// Tangent along X direction
+		if (abs(Normal.z) < 0.999)
+		{
+			Tangent = normalize(cross(float3(0, 0, 1), Normal));
+		}
+		else
+		{
+			Tangent = normalize(cross(float3(1, 0, 0), Normal));
+		}
+		
+		Binormal = cross(Normal, Tangent);
+	}
+	
+	// Calculate binormal sign (handedness)
+	// UE expects: Binormal = Cross(Normal, Tangent) * TangentW
+	float3 ExpectedBinormal = cross(Normal, Tangent);
+	float BinormalSign = dot(Binormal, ExpectedBinormal) >= 0.0 ? 1.0 : -1.0;
+	
+	// Store tangent with binormal sign in w component
+	OutputTangents[VertexIndex] = float4(Tangent, BinormalSign);
+}

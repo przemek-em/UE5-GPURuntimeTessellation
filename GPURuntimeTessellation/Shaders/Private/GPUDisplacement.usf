@@ -1,0 +1,112 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+/*=============================================================================
+	GPUDisplacement.usf: Compute shader for applying displacement mapping
+	
+	This shader applies height displacement to generated vertices.
+	Replaces Domain Shader displacement logic.
+	
+	Features:
+	- Texture-based displacement
+	- Procedural sine wave displacement (for testing)
+	- RVT mask support
+	- Adjustable intensity and offset
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Parameters
+float DisplacementIntensity;
+float DisplacementOffset;
+uint bUseSineWaveDisplacement;
+uint bHasRVTMask;
+uint VertexCount;
+
+// UV remapping for patch rendering
+float2 UVOffset;
+float2 UVScale;
+
+// Texture resources
+Texture2D DisplacementTexture;
+SamplerState DisplacementSampler;
+Texture2D RVTMaskTexture;
+SamplerState RVTMaskSampler;
+
+// Input buffers
+StructuredBuffer<float3> InputPositions;
+StructuredBuffer<float3> InputNormals;
+StructuredBuffer<float2> InputUVs;
+
+// Output buffer
+RWStructuredBuffer<float3> OutputPositions;
+
+/**
+ * Sample displacement value from texture or procedural function
+ * UV is already remapped by the caller!
+ */
+float SampleDisplacement(float2 RemappedUV)
+{
+	float Height = 0.0;
+	
+	if (bUseSineWaveDisplacement)
+	{
+		// Procedural sine wave for testing (use remapped UV)
+		Height = sin(RemappedUV.x * 10.0) * sin(RemappedUV.y * 10.0) * 0.5 + 0.5;
+	}
+	else
+	{
+		// Sample from displacement texture (single channel, R component)
+		// Using SampleLevel to avoid mip issues in compute shader
+		float4 TextureSample = DisplacementTexture.SampleLevel(DisplacementSampler, RemappedUV, 0);
+		Height = TextureSample.r;
+		
+		// Apply RVT mask if available
+		if (bHasRVTMask)
+		{
+			float4 MaskSample = RVTMaskTexture.SampleLevel(RVTMaskSampler, RemappedUV, 0);
+			float Mask = MaskSample.r;
+			Height *= (1.0 - Mask);
+		}
+	}
+	
+	return Height;
+}
+
+/**
+ * Main compute shader entry point
+ * One thread per vertex
+ */
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void ApplyDisplacement(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint VertexIndex = ThreadId.x;
+	
+	if (VertexIndex >= VertexCount)
+		return;
+	
+	// Load vertex data
+	float3 Position = InputPositions[VertexIndex];
+	float3 Normal = InputNormals[VertexIndex];
+	float2 UV = InputUVs[VertexIndex];
+	
+	// CRITICAL FIX: UV is already correctly remapped in vertex generation!
+	// The vertex generation shader applies: GlobalUV = (u, v) * PatchUVScale + PatchUVOffset
+	// So UV here is already in the correct texture coordinate space [0,1] for the full texture
+	// DO NOT remap again or we'll sample the wrong portion of the texture!
+	//
+	// OLD (WRONG): float2 RemappedUV = UV * UVScale + UVOffset;  // Double remapping!
+	// NEW (CORRECT): Use UV directly
+	float2 RemappedUV = UV;
+	
+	// Sample displacement
+	float Displacement = SampleDisplacement(RemappedUV);
+	
+	// Apply intensity and offset
+	Displacement = Displacement * DisplacementIntensity + DisplacementOffset;
+	
+	// Apply displacement along normal
+	float3 DisplacedPosition = Position + Normal * Displacement;
+	
+	// Store result
+	OutputPositions[VertexIndex] = DisplacedPosition;
+}

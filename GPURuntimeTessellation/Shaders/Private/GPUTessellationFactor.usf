@@ -1,0 +1,79 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+/*=============================================================================
+	GPUTessellationFactor.usf: Compute shader for calculating tessellation factors
+	
+	This shader calculates per-triangle tessellation factors based on:
+	- Distance to camera (distance-based LOD)
+	- Camera frustum visibility
+	- Custom LOD parameters
+	
+	Replaces the constant function in Hull Shader pipeline.
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Parameters
+float3 CameraPosition;
+float MaxTessellationDistance;
+float MinTessellationFactor;
+float MaxTessellationFactor;
+float4x4 LocalToWorld;
+uint TriangleCount;
+
+// Input buffers
+StructuredBuffer<float3> InputVertices;
+StructuredBuffer<uint> InputIndices;
+
+// Output buffer
+RWStructuredBuffer<float> OutputTessFactors;
+
+/**
+ * Calculate tessellation factor based on distance to camera
+ */
+float CalculateLODFactor(float3 TriangleCenter)
+{
+	float Distance = length(TriangleCenter - CameraPosition);
+	
+	// Linear interpolation based on distance
+	float DistanceScale = saturate(Distance / MaxTessellationDistance);
+	float Factor = lerp(MaxTessellationFactor, MinTessellationFactor, DistanceScale);
+	
+	return max(Factor, 1.0); // Ensure at least 1.0
+}
+
+/**
+ * Main compute shader entry point
+ * One thread per triangle
+ */
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void CalculateTessellationFactors(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint TriangleIndex = ThreadId.x;
+	
+	if (TriangleIndex >= TriangleCount)
+		return;
+	
+	// Load triangle vertices
+	uint Idx0 = InputIndices[TriangleIndex * 3 + 0];
+	uint Idx1 = InputIndices[TriangleIndex * 3 + 1];
+	uint Idx2 = InputIndices[TriangleIndex * 3 + 2];
+	
+	float3 V0 = InputVertices[Idx0];
+	float3 V1 = InputVertices[Idx1];
+	float3 V2 = InputVertices[Idx2];
+	
+	// Transform to world space
+	float3 WorldV0 = mul(float4(V0, 1.0), LocalToWorld).xyz;
+	float3 WorldV1 = mul(float4(V1, 1.0), LocalToWorld).xyz;
+	float3 WorldV2 = mul(float4(V2, 1.0), LocalToWorld).xyz;
+	
+	// Calculate triangle center
+	float3 Center = (WorldV0 + WorldV1 + WorldV2) / 3.0;
+	
+	// Calculate tessellation factor
+	float TessFactor = CalculateLODFactor(Center);
+	
+	// Store result
+	OutputTessFactors[TriangleIndex] = TessFactor;
+}

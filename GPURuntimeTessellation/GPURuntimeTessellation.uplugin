@@ -1,0 +1,25 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1",
+	"FriendlyName": "GPU Runtime Tessellation (Pure Compute)",
+	"Description": "Pure compute shader-based runtime tessellation without Hull/Domain shaders. Implements tessellation, displacement mapping, and dynamic LOD entirely in compute shaders for universal platform support.",
+	"Category": "Experimental",
+	"CreatedBy": "Przemysław Mielniczenko",
+	"CreatedByURL": "https://www.linkedin.com/in/przemyslaw-mielniczenko/",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "GPURuntimeTessellation",
+			"Type": "Runtime",
+			"LoadingPhase": "PostConfigInit"
+		}
+	],
+	"Plugins": []
+}

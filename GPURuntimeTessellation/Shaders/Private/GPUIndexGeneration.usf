@@ -1,0 +1,125 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+/*=============================================================================
+	GPUIndexGeneration.usf: Compute shader for generating triangle indices
+	
+	This shader generates triangle indices for a regular grid mesh.
+	
+	For a grid of ResolutionX × ResolutionY vertices:
+	- Generates (ResolutionX-1) × (ResolutionY-1) quads
+	- Each quad consists of 2 triangles
+	- Total triangles: (ResolutionX-1) × (ResolutionY-1) × 2
+	- Total indices: triangles × 3
+	
+	Winding order: Counter-clockwise (front-facing)
+=============================================================================*/
+
+#include "/Engine/Private/Common.ush"
+
+// Parameters
+uint ResolutionX;
+uint ResolutionY;
+uint4 EdgeCollapseFactors; // X=West, Y=East, Z=South, W=North collapse ratios
+
+// Output buffer (typed RWBuffer so we can bind as a proper index buffer downstream)
+RWBuffer<uint> OutputIndices;
+
+uint ClampStride(uint Stride, uint AxisSegments)
+{
+	AxisSegments = max(1u, AxisSegments);
+	Stride = max(1u, Stride);
+	return min(Stride, AxisSegments);
+}
+
+uint ApplyEdgeCollapse(uint VertexIndex, uint VertexX, uint VertexY)
+{
+	const uint LastX = (ResolutionX > 0) ? (ResolutionX - 1) : 0;
+	const uint LastY = (ResolutionY > 0) ? (ResolutionY - 1) : 0;
+
+	if (EdgeCollapseFactors.x > 1 && VertexX == 0)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.x, LastY);
+		if (VertexY != LastY)
+		{
+			const uint CollapsedY = (VertexY / Stride) * Stride;
+			VertexIndex = CollapsedY * ResolutionX + VertexX;
+		}
+	}
+	if (EdgeCollapseFactors.y > 1 && VertexX == LastX)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.y, LastY);
+		if (VertexY != LastY)
+		{
+			const uint CollapsedY = (VertexY / Stride) * Stride;
+			VertexIndex = CollapsedY * ResolutionX + VertexX;
+		}
+	}
+	if (EdgeCollapseFactors.z > 1 && VertexY == 0)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.z, LastX);
+		if (VertexX != LastX)
+		{
+			const uint CollapsedX = (VertexX / Stride) * Stride;
+			VertexIndex = VertexY * ResolutionX + CollapsedX;
+		}
+	}
+	if (EdgeCollapseFactors.w > 1 && VertexY == LastY)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.w, LastX);
+		if (VertexX != LastX)
+		{
+			const uint CollapsedX = (VertexX / Stride) * Stride;
+			VertexIndex = VertexY * ResolutionX + CollapsedX;
+		}
+	}
+
+	return VertexIndex;
+}
+
+/**
+ * Main compute shader entry point
+ * One thread per quad
+ * Thread group: 8x8x1
+ */
+[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
+void GenerateIndices(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint x = ThreadId.x;
+	uint y = ThreadId.y;
+	
+	// Check bounds - we generate indices for quads, not vertices
+	if (x >= ResolutionX - 1 || y >= ResolutionY - 1)
+		return;
+	
+	// Calculate quad index
+	uint QuadIndex = y * (ResolutionX - 1) + x;
+	uint IndexOffset = QuadIndex * 6; // 2 triangles × 3 vertices
+	
+	// Calculate vertex indices for this quad
+	// Grid layout (Y increases upward, viewed from +Z looking down):
+	// v2 ---- v3
+	// |  \    |
+	// |    \  |
+	// v0 ---- v1
+	
+	uint v0 = y * ResolutionX + x;           // Bottom-left
+	uint v1 = y * ResolutionX + (x + 1);     // Bottom-right
+	uint v2 = (y + 1) * ResolutionX + x;     // Top-left
+	uint v3 = (y + 1) * ResolutionX + (x + 1); // Top-right
+
+	// Collapse vertices along edges that abut lower-LOD neighbors to remove T-junctions
+	v0 = ApplyEdgeCollapse(v0, x, y);
+	v1 = ApplyEdgeCollapse(v1, x + 1, y);
+	v2 = ApplyEdgeCollapse(v2, x, y + 1);
+	v3 = ApplyEdgeCollapse(v3, x + 1, y + 1);
+	
+	// First triangle: v0 -> v2 -> v1 (counter-clockwise when viewed from +Z)
+	OutputIndices[IndexOffset + 0] = v0;
+	OutputIndices[IndexOffset + 1] = v2;
+	OutputIndices[IndexOffset + 2] = v1;
+	
+	// Second triangle: v1 -> v2 -> v3 (counter-clockwise when viewed from +Z)
+	OutputIndices[IndexOffset + 3] = v1;
+	OutputIndices[IndexOffset + 4] = v2;
+	OutputIndices[IndexOffset + 5] = v3;
+}
