@@ -213,6 +213,7 @@ public:
 		// Grid parameters
 		SHADER_PARAMETER(uint32, ResolutionX)
 		SHADER_PARAMETER(uint32, ResolutionY)
+		SHADER_PARAMETER(FIntVector4, EdgeCollapseFactors)
 		
 		// Output buffer (typed UAV so it can become a real IndexBuffer later)
 		SHADER_PARAMETER_RDG_BUFFER_UAV(RWBuffer<uint>, OutputIndices)

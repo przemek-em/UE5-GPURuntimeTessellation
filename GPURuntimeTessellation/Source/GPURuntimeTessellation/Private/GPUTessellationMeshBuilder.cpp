@@ -25,18 +25,22 @@ FGPUTessellationMeshBuilder::~FGPUTessellationMeshBuilder()
 
 FIntPoint FGPUTessellationMeshBuilder::CalculateResolution(float TessellationFactor) const
 {
-	// Map "tessellation factor" to grid resolution.
-	// By default we use 4 verts per factor step to keep density intuitive (e.g., 16 -> 64x64).
-	int32 Resolution = FMath::RoundToInt(TessellationFactor) * 4;
-	Resolution = FMath::Clamp(Resolution, 4, 1024);  // Max 1024 (256 * 4) to support tessellation up to 256
-
-	// IMPORTANT: Pad to threadgroup size for fully covered compute dispatch on all GPUs.
-	// This avoids edge-case under-dispatch on some drivers/hardware when the last partial group
-	// is optimized away or yields undefined lanes, which manifested as the last row/column
-	// of vertices occasionally not being written for smaller factors.
-	// Padding ensures consistent coverage (the shaders still clamp by bounds).
+	// Convert tessellation factor to "segment" count so adjacent LODs share divisors.
+	// Each factor step contributes 4 segments (matching historical density), then we add 1 vertex
+	// to close the grid so seams can collapse cleanly between high/low detail edges.
 	const int32 ThreadGroupSize = 8; // must match THREADGROUP_SIZE_X/Y in shaders
-	Resolution = FMath::DivideAndRoundUp(Resolution, ThreadGroupSize) * ThreadGroupSize;
+	const int32 MaxResolution = 1024;
+	const int32 MaxSegments = MaxResolution - 1;
+
+	int32 DesiredSegments = FMath::Max(1, FMath::RoundToInt(TessellationFactor) * 4);
+	DesiredSegments = FMath::Clamp(DesiredSegments, ThreadGroupSize, MaxSegments);
+
+	// Pad the segment count (not the vertex count) to the threadgroup size so compute dispatches stay aligned.
+	int32 Segments = FMath::DivideAndRoundUp(DesiredSegments, ThreadGroupSize) * ThreadGroupSize;
+	Segments = FMath::Clamp(Segments, ThreadGroupSize, MaxSegments);
+
+	// Add the extra vertex necessary to close the grid, ensuring adjacent patch edges now line up exactly.
+	const int32 Resolution = FMath::Min(Segments + 1, MaxResolution);
 
 	return FIntPoint(Resolution, Resolution);
 }
@@ -75,8 +79,8 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 
-	// Step 4: Generate indices
-	DispatchIndexGeneration(GraphBuilder, Resolution, IndexBuffer);
+	// Step 4: Generate indices (no edge collapsing needed for single mesh)
+	DispatchIndexGeneration(GraphBuilder, Resolution, FIntVector4(1, 1, 1, 1), IndexBuffer);
 
 	// Step 5: Extract mesh data to CPU
 	ExtractMeshData(GraphBuilder, Resolution, VertexBuffer, NormalBuffer, UVBuffer, IndexBuffer, OutMeshData);
@@ -333,6 +337,7 @@ void FGPUTessellationMeshBuilder::DispatchNormalCalculation(
 void FGPUTessellationMeshBuilder::DispatchIndexGeneration(
 	FRDGBuilder& GraphBuilder,
 	FIntPoint Resolution,
+	const FIntVector4& EdgeCollapseFactors,
 	FRDGBufferRef& OutIndexBuffer)
 {
 	int32 IndexCount = (Resolution.X - 1) * (Resolution.Y - 1) * 6;
@@ -350,6 +355,7 @@ void FGPUTessellationMeshBuilder::DispatchIndexGeneration(
 	FGPUIndexGenerationCS::FParameters* PassParameters = GraphBuilder.AllocParameters<FGPUIndexGenerationCS::FParameters>();
 	PassParameters->ResolutionX = Resolution.X;
 	PassParameters->ResolutionY = Resolution.Y;
+	PassParameters->EdgeCollapseFactors = EdgeCollapseFactors;
 	// Create a typed UAV (R32_UINT) to match RWBuffer<uint> in the shader
 	PassParameters->OutputIndices = GraphBuilder.CreateUAV(FRDGBufferUAVDesc(OutIndexBuffer, PF_R32_UINT));
 
@@ -507,8 +513,8 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 		DispatchNormalCalculation(GraphBuilder, Settings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 
-	// Step 4: Generate indices
-	DispatchIndexGeneration(GraphBuilder, Resolution, IndexBuffer);
+	// Step 4: Generate indices (no edge collapsing needed for single mesh)
+	DispatchIndexGeneration(GraphBuilder, Resolution, FIntVector4(1, 1, 1, 1), IndexBuffer);
 
 	// Step 5: Create persistent RHI buffers (no CPU readback!)
 	// Extract buffers to persistent pooled buffers
@@ -617,6 +623,7 @@ void FGPUTessellationMeshBuilder::ExecutePatchTessellationPipeline(
 		*Location.ToString(), *Scale.ToString());
 	
 	CalculatePatchInfo(Settings, LocalToWorld, CameraPosition, ViewFrustum, PatchCountX, PatchCountY, PatchInfo);
+	ComputePatchEdgeTransitions(PatchCountX, PatchCountY, PatchInfo);
 	
 	// Resize patch buffer arrays
 	int32 TotalPatches = PatchCountX * PatchCountY;
@@ -671,9 +678,7 @@ void FGPUTessellationMeshBuilder::ExecutePatchTessellationPipeline(
 			GraphBuilder,
 			Settings,
 			LocalToWorld,
-			Patch.PatchOffset,
-			Patch.PatchSize,
-			Patch.TessellationLevel,
+			Patch,
 			DisplacementTexture,
 			SubtractTexture,
 			NormalMapTexture,
@@ -695,15 +700,14 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	FRDGBuilder& GraphBuilder,
 	const FGPUTessellationSettings& Settings,
 	const FMatrix& LocalToWorld,
-	const FVector2f& PatchUVOffset,
-	const FVector2f& PatchUVSize,
-	int32 TessellationLevel,
+	const FGPUTessellationPatchInfo& PatchInfo,
 	UTexture* DisplacementTexture,
 	UTexture* SubtractTexture,
 	UTexture* NormalMapTexture,
 	FGPUTessellationBuffers& OutPatchBuffers)
 {
 	// Validate tessellation level first
+	const int32 TessellationLevel = PatchInfo.TessellationLevel;
 	if (TessellationLevel <= 0)
 	{
 		UE_LOG(LogTemp, Error, TEXT("GPUTessellation: GenerateSinglePatch - Invalid TessellationLevel=%d (must be > 0)"), 
@@ -735,13 +739,13 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	}
 	
 	// Validate UV offset and scale
-	if (PatchUVOffset.X < 0.0f || PatchUVOffset.Y < 0.0f || 
-	    PatchUVOffset.X > 1.0f || PatchUVOffset.Y > 1.0f ||
-	    PatchUVSize.X <= 0.0f || PatchUVSize.Y <= 0.0f ||
-	    PatchUVSize.X > 1.0f || PatchUVSize.Y > 1.0f)
+	if (PatchInfo.PatchOffset.X < 0.0f || PatchInfo.PatchOffset.Y < 0.0f || 
+	    PatchInfo.PatchOffset.X > 1.0f || PatchInfo.PatchOffset.Y > 1.0f ||
+	    PatchInfo.PatchSize.X <= 0.0f || PatchInfo.PatchSize.Y <= 0.0f ||
+	    PatchInfo.PatchSize.X > 1.0f || PatchInfo.PatchSize.Y > 1.0f)
 	{
 		UE_LOG(LogTemp, Error, TEXT("GPUTessellation: GenerateSinglePatch - Invalid UV parameters: Offset=(%.3f,%.3f) Size=(%.3f,%.3f)"),
-			PatchUVOffset.X, PatchUVOffset.Y, PatchUVSize.X, PatchUVSize.Y);
+			PatchInfo.PatchOffset.X, PatchInfo.PatchOffset.Y, PatchInfo.PatchSize.X, PatchInfo.PatchSize.Y);
 		OutPatchBuffers.Reset();
 		return;
 	}
@@ -778,13 +782,13 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	// Each patch is a "window" into the full plane, not a separate small plane.
 	
 	// Calculate this patch's size in LOCAL space (size of the "window")
-	float PatchLocalSizeX = PatchUVSize.X * FullPlaneSizeX;  // Renamed from "PatchWorldSizeX" for clarity
-	float PatchLocalSizeY = PatchUVSize.Y * FullPlaneSizeY;  // Renamed from "PatchWorldSizeY" for clarity
+	float PatchLocalSizeX = PatchInfo.PatchSize.X * FullPlaneSizeX;  // Renamed from "PatchWorldSizeX" for clarity
+	float PatchLocalSizeY = PatchInfo.PatchSize.Y * FullPlaneSizeY;  // Renamed from "PatchWorldSizeY" for clarity
 	
 	// Calculate the patch's corner position in local space (plane is centered at origin)
 	// The vertex shader generates from [-0.5, +0.5], so we need to offset from there
-	float LocalMinX = (PatchUVOffset.X - 0.5f) * FullPlaneSizeX;
-	float LocalMinY = (PatchUVOffset.Y - 0.5f) * FullPlaneSizeY;
+	float LocalMinX = (PatchInfo.PatchOffset.X - 0.5f) * FullPlaneSizeX;
+	float LocalMinY = (PatchInfo.PatchOffset.Y - 0.5f) * FullPlaneSizeY;
 	
 	// Calculate patch center in LOCAL space
 	float LocalCenterX = LocalMinX + (PatchLocalSizeX * 0.5f);
@@ -811,8 +815,8 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	
 	// Set UV offset/scale for material UVs and displacement sampling
 	// This tells the shader which portion of the texture to sample
-	PatchSettings.UVOffset = PatchUVOffset;
-	PatchSettings.UVScale = PatchUVSize;
+	PatchSettings.UVOffset = PatchInfo.PatchOffset;
+	PatchSettings.UVScale = PatchInfo.PatchSize;
 	
 	// Step 1: Generate vertices for this patch using FULL plane size
 	// CRITICAL: Pass Settings (not PatchSettings) for PlaneSizeX/Y to ensure global scale
@@ -829,8 +833,8 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 		DispatchNormalCalculation(GraphBuilder, PatchSettings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
 	
-	// Step 4: Generate indices
-	DispatchIndexGeneration(GraphBuilder, Resolution, IndexBuffer);
+	// Step 4: Generate indices with seam stitching info
+	DispatchIndexGeneration(GraphBuilder, Resolution, PatchInfo.EdgeCollapseFactors, IndexBuffer);
 	
 	// Step 5: Convert to persistent RHI buffers (pure GPU, no CPU readback)
 	OutPatchBuffers.VertexCount = VertexCount;
@@ -977,6 +981,9 @@ void FGPUTessellationMeshBuilder::CalculatePatchInfo(
 			
 			// Determine tessellation level based on distance
 			Patch.TessellationLevel = CalculatePatchTessellationLevel(Distance, Settings);
+			FIntPoint PatchResolution = CalculateResolution(static_cast<float>(Patch.TessellationLevel));
+			Patch.ResolutionX = PatchResolution.X;
+			Patch.ResolutionY = PatchResolution.Y;
 			
 			// Debug: Log ALL patches if first one has issues, or first 8 patches
 			// Also log camera and patch positions to verify distance calculation
@@ -1014,6 +1021,68 @@ void FGPUTessellationMeshBuilder::CalculatePatchInfo(
 				// Culling disabled or no frustum - always visible
 				Patch.bVisible = true;
 			}
+		}
+	}
+}
+
+void FGPUTessellationMeshBuilder::ComputePatchEdgeTransitions(
+	int32 PatchCountX,
+	int32 PatchCountY,
+	TArray<FGPUTessellationPatchInfo>& PatchInfo) const
+{
+	const int32 ExpectedCount = PatchCountX * PatchCountY;
+	if (PatchCountX <= 0 || PatchCountY <= 0 || PatchInfo.Num() != ExpectedCount)
+	{
+		return;
+	}
+
+	const auto GetPatch = [&](int32 X, int32 Y) -> const FGPUTessellationPatchInfo*
+	{
+		if (X < 0 || X >= PatchCountX || Y < 0 || Y >= PatchCountY)
+		{
+			return nullptr;
+		}
+		return &PatchInfo[Y * PatchCountX + X];
+	};
+
+	for (int32 Y = 0; Y < PatchCountY; ++Y)
+	{
+		for (int32 X = 0; X < PatchCountX; ++X)
+		{
+			FGPUTessellationPatchInfo& Patch = PatchInfo[Y * PatchCountX + X];
+			Patch.EdgeCollapseFactors = FIntVector4(1, 1, 1, 1);
+
+			auto ComputeFactor = [&](const FGPUTessellationPatchInfo* Neighbor, bool bVerticalEdge) -> int32
+			{
+				if (!Neighbor)
+				{
+					return 1;
+				}
+				if (Patch.ResolutionX <= 0 || Patch.ResolutionY <= 0 || Neighbor->ResolutionX <= 0 || Neighbor->ResolutionY <= 0)
+				{
+					return 1;
+				}
+				if (Neighbor->TessellationLevel >= Patch.TessellationLevel)
+				{
+					return 1;
+				}
+
+				const int32 MySegments = bVerticalEdge ? FMath::Max(1, Patch.ResolutionY - 1) : FMath::Max(1, Patch.ResolutionX - 1);
+				const int32 NeighborSegments = bVerticalEdge ? FMath::Max(1, Neighbor->ResolutionY - 1) : FMath::Max(1, Neighbor->ResolutionX - 1);
+				if (NeighborSegments <= 0 || MySegments <= NeighborSegments)
+				{
+					return 1;
+				}
+
+				int32 Factor = FMath::Max(1, MySegments / NeighborSegments);
+				Factor = FMath::Clamp(Factor, 1, 64);
+				return Factor;
+			};
+
+			Patch.EdgeCollapseFactors.X = ComputeFactor(GetPatch(X - 1, Y), true);  // West edge (vertical segments)
+			Patch.EdgeCollapseFactors.Y = ComputeFactor(GetPatch(X + 1, Y), true);  // East edge
+			Patch.EdgeCollapseFactors.Z = ComputeFactor(GetPatch(X, Y - 1), false); // South edge (horizontal segments)
+			Patch.EdgeCollapseFactors.W = ComputeFactor(GetPatch(X, Y + 1), false); // North edge
 		}
 	}
 }

@@ -137,6 +137,9 @@ struct FGPUTessellationPatchInfo
 	int32 PatchIndexX;             // Patch grid X index
 	int32 PatchIndexY;             // Patch grid Y index
 	bool bVisible;                 // Frustum culling result
+	int32 ResolutionX;             // Cached resolution X for this patch (after tessellation factor to grid conversion)
+	int32 ResolutionY;             // Cached resolution Y for this patch
+	FIntVector4 EdgeCollapseFactors; // West, East, South, North collapse ratios (1 = none)
 	
 	FGPUTessellationPatchInfo()
 		: PatchOffset(0, 0)
@@ -147,6 +150,9 @@ struct FGPUTessellationPatchInfo
 		, PatchIndexX(0)
 		, PatchIndexY(0)
 		, bVisible(true)
+		, ResolutionX(0)
+		, ResolutionY(0)
+		, EdgeCollapseFactors(1, 1, 1, 1)
 	{}
 };
 
@@ -349,6 +355,7 @@ private:
 	void DispatchIndexGeneration(
 		FRDGBuilder& GraphBuilder,
 		FIntPoint Resolution,
+		const FIntVector4& EdgeCollapseFactors,
 		FRDGBufferRef& OutIndexBuffer);
 
 	/**
@@ -383,13 +390,19 @@ private:
 		FRDGBuilder& GraphBuilder,
 		const FGPUTessellationSettings& Settings,
 		const FMatrix& LocalToWorld,
-		const FVector2f& PatchUVOffset,
-		const FVector2f& PatchUVSize,
-		int32 TessellationLevel,
+		const FGPUTessellationPatchInfo& PatchInfo,
 		UTexture* DisplacementTexture,
 		UTexture* SubtractTexture,
 		UTexture* NormalMapTexture,
 		FGPUTessellationBuffers& OutPatchBuffers);
+
+	/**
+	 * Analyze neighboring patches and compute per-edge collapse ratios so high-detail edges stitch to coarser neighbors.
+	 */
+	void ComputePatchEdgeTransitions(
+		int32 PatchCountX,
+		int32 PatchCountY,
+		TArray<FGPUTessellationPatchInfo>& PatchInfo) const;
 
 	/**
 	 * Calculate patch information (bounds, centers, LOD levels)

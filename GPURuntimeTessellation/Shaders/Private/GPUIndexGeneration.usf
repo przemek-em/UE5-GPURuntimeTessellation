@@ -19,9 +19,62 @@
 // Parameters
 uint ResolutionX;
 uint ResolutionY;
+uint4 EdgeCollapseFactors; // X=West, Y=East, Z=South, W=North collapse ratios
 
 // Output buffer (typed RWBuffer so we can bind as a proper index buffer downstream)
 RWBuffer<uint> OutputIndices;
+
+uint ClampStride(uint Stride, uint AxisSegments)
+{
+	AxisSegments = max(1u, AxisSegments);
+	Stride = max(1u, Stride);
+	return min(Stride, AxisSegments);
+}
+
+uint ApplyEdgeCollapse(uint VertexIndex, uint VertexX, uint VertexY)
+{
+	const uint LastX = (ResolutionX > 0) ? (ResolutionX - 1) : 0;
+	const uint LastY = (ResolutionY > 0) ? (ResolutionY - 1) : 0;
+
+	if (EdgeCollapseFactors.x > 1 && VertexX == 0)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.x, LastY);
+		if (VertexY != LastY)
+		{
+			const uint CollapsedY = (VertexY / Stride) * Stride;
+			VertexIndex = CollapsedY * ResolutionX + VertexX;
+		}
+	}
+	if (EdgeCollapseFactors.y > 1 && VertexX == LastX)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.y, LastY);
+		if (VertexY != LastY)
+		{
+			const uint CollapsedY = (VertexY / Stride) * Stride;
+			VertexIndex = CollapsedY * ResolutionX + VertexX;
+		}
+	}
+	if (EdgeCollapseFactors.z > 1 && VertexY == 0)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.z, LastX);
+		if (VertexX != LastX)
+		{
+			const uint CollapsedX = (VertexX / Stride) * Stride;
+			VertexIndex = VertexY * ResolutionX + CollapsedX;
+		}
+	}
+	if (EdgeCollapseFactors.w > 1 && VertexY == LastY)
+	{
+		const uint Stride = ClampStride(EdgeCollapseFactors.w, LastX);
+		if (VertexX != LastX)
+		{
+			const uint CollapsedX = (VertexX / Stride) * Stride;
+			VertexIndex = VertexY * ResolutionX + CollapsedX;
+		}
+	}
+
+	return VertexIndex;
+}
 
 /**
  * Main compute shader entry point
@@ -53,6 +106,12 @@ void GenerateIndices(uint3 ThreadId : SV_DispatchThreadID)
 	uint v1 = y * ResolutionX + (x + 1);     // Bottom-right
 	uint v2 = (y + 1) * ResolutionX + x;     // Top-left
 	uint v3 = (y + 1) * ResolutionX + (x + 1); // Top-right
+
+	// Collapse vertices along edges that abut lower-LOD neighbors to remove T-junctions
+	v0 = ApplyEdgeCollapse(v0, x, y);
+	v1 = ApplyEdgeCollapse(v1, x + 1, y);
+	v2 = ApplyEdgeCollapse(v2, x, y + 1);
+	v3 = ApplyEdgeCollapse(v3, x + 1, y + 1);
 	
 	// First triangle: v0 -> v2 -> v1 (counter-clockwise when viewed from +Z)
 	OutputIndices[IndexOffset + 0] = v0;
