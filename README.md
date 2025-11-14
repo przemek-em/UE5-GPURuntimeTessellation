@@ -447,12 +447,13 @@ All buffers are created by compute shaders and **never leave GPU memory** - ensu
 
 - [ ] Collision system
 - [ ] Virtual Shadow Maps integration
-- [ ] Seamless improvement for patch system
+- [x] Seamless improvement for patch system
 - [ ] Complete Density Texture LOD implementation
 - [ ] Support for arbitrary base meshes
 - [ ] GPU-driven autonomous LOD (move LOD calculations to GPU)
 - [ ] Automatic water/ocean simulation
 - [ ] Optional Subdivision
+- [ ] Optional CDLOD mode with morphing
 
 ---
 
