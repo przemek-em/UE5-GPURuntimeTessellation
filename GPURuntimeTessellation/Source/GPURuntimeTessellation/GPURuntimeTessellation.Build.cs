@@ -26,6 +26,7 @@ public class GPURuntimeTessellation : ModuleRules
 				"Core",
 				"CoreUObject",
 				"Engine",
+				"PhysicsCore",
 				"RenderCore",
 				"Renderer",
 				"RHI",
@@ -45,10 +46,13 @@ public class GPURuntimeTessellation : ModuleRules
 			PrivateDependencyModuleNames.AddRange(
 				new string[]
 				{
+					"AssetRegistry",
 					"Slate",
 					"SlateCore",
 					"UnrealEd",
 					"PropertyEditor",
+					"MeshDescription",
+					"StaticMeshDescription",
 					"EditorStyle",
 					"ToolMenus",
 					"InputCore",

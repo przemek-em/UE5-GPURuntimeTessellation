@@ -74,6 +74,15 @@ private:
 	/** Initialize vertex factories for all patches */
 	void InitializePatchVertexFactories(FRHICommandListImmediate& RHICmdList);
 
+	/** Apply height-source pixel normal parameters to a vertex factory. */
+	void ConfigureVertexFactoryHeightNormals(FGPUTessellationVertexFactory& InVertexFactory) const;
+
+	/** Update patch metadata/desired LOD state without reallocating patch geometry buffers. */
+	bool UpdatePersistentPatchState_RenderThread(const FVector& CameraPosition, const FMatrix& ComponentTransform);
+
+	/** Emit experimental persistent-patch stats when debug logging is enabled. */
+	void LogPersistentPatchStats_RenderThread(const TCHAR* Reason) const;
+
 private:
 	/** Material render proxy */
 	FMaterialRenderProxy* MaterialProxy;
@@ -81,9 +90,10 @@ private:
 	/** Tessellation settings */
 	FGPUTessellationSettings Settings;
 
-	/** Cached transforms and textures for patch regeneration */
+	/** Cached transforms and textures for dynamic patch rebuild/state updates */
 	FMatrix CachedLocalToWorld;
 	TObjectPtr<UTexture> CachedDisplacementTexture;
+	TObjectPtr<UTexture> CachedVectorDisplacementTexture;
 	TObjectPtr<UTexture> CachedSubtractTexture;
 	TObjectPtr<UTexture> CachedNormalMapTexture;
 
@@ -93,11 +103,16 @@ private:
 	/** GPU patch buffers - for spatial patch mode */
 	mutable FGPUTessellationPatchBuffers GPUPatchBuffers;
 
+	/** Most recent camera-derived patch LOD state. In persistent mode this can differ from generated geometry. */
+	mutable TArray<FGPUTessellationPatchInfo> LatestPatchLODState;
+
 	/** Vertex factory for GPU buffer rendering - single mesh */
 	mutable FGPUTessellationVertexFactory VertexFactory;
+	mutable FGPUTessellationGPUSceneVertexFactory ShadowVertexFactory;
 
 	/** Vertex factories for patch rendering - one per patch (array of pointers since vertex factory requires constructor args) */
 	mutable TArray<FGPUTessellationVertexFactory*> PatchVertexFactories;
+	mutable TArray<FGPUTessellationGPUSceneVertexFactory*> PatchShadowVertexFactories;
 
 	/** Is mesh data valid and ready to render */
 	mutable bool bMeshValid;
@@ -119,6 +134,12 @@ private:
 
 	/** Last camera position used for patch generation (to detect movement) */
 	mutable FVector LastCameraPosition;
+
+	/** Experimental patch persistence debug counters. */
+	uint64 PatchGeometryRebuildCount = 0;
+	uint64 PatchStateUpdateCount = 0;
+	uint64 PatchVertexFactoryReinitCount = 0;
+	mutable double LastPersistentPatchStatsLogTime = 0.0;
 
 	friend class UGPUTessellationComponent;
 };

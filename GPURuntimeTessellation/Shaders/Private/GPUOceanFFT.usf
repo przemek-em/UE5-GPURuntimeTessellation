@@ -1,0 +1,248 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+//
+// GPUOceanFFT.usf - Tessendorf-style FFT ocean.
+//
+// Pipeline (called once per frame from C++ when OceanWaveMode == FFT):
+//   1. InitSpectrumCS  : writes height plus horizontal displacement spectra from a Phillips
+//                        spectrum. Horizontal components use the standard -i*k/|k| term so
+//                        FFTChoppiness produces crest sharpening instead of being a no-op.
+//   2. FFTRowCS        : 1D inverse FFT along X for height, Dx, and Dy.
+//   3. FFTColCS        : 1D inverse FFT along Y and writes a displacement map:
+//                        (X = horizontal local X, Y = horizontal local Y, Z = height, W = reserved).
+//
+// Sampling: GPUDisplacement.usf reads the displacement map bilinearly at
+// frac(WorldXY / FFTTileSize), so the map tiles across any plane size. True AAA oceans hide
+// that periodicity with cascades; this pass is the single-cascade building block.
+
+#include "/Engine/Private/Common.ush"
+
+#define OCEAN_FFT_N        256
+#define OCEAN_FFT_LOG2_N   8
+#define OCEAN_FFT_PI       3.14159265359f
+#define OCEAN_FFT_TWOPI    6.28318530718f
+#define OCEAN_FFT_GRAVITY  980.0f   // cm/s^2 (Unreal cm units)
+
+// ---- Uniforms ----
+uint   FFTSpectrumSeed;        // Random seed (drives H0 noise; deterministic per frame)
+float  FFTTime;                // Animation time in seconds
+float  FFTTileSize;            // Physical tile size in cm (period of the displacement map)
+float  FFTWindSpeed;           // cm/s
+float2 FFTWindDir;             // unit vector
+float  FFTAmplitudeScale;      // Phillips amplitude scalar (user-tunable wave height)
+float  FFTChoppiness;          // 0 = vertical-only, 1..2 = stronger horizontal crest sharpening
+uint   FFTMotionMode;          // Reserved; Natural Sway is applied during displacement sampling.
+float  FFTSwayIntensity;
+float  FFTSwayRate;
+float  FFTSwayDrift;
+
+// ---- Resources ----
+RWTexture2D<float2> SpectrumHeightOut;          // Complex H~(k,t)
+RWTexture2D<float2> SpectrumDisplacementXOut;   // Complex -i*kx/|k|*H~(k,t)
+RWTexture2D<float2> SpectrumDisplacementYOut;   // Complex -i*ky/|k|*H~(k,t)
+
+RWTexture2D<float2> SpectrumHeightInOut;
+RWTexture2D<float2> SpectrumDisplacementXInOut;
+RWTexture2D<float2> SpectrumDisplacementYInOut;
+
+RWTexture2D<float4> DisplacementMapOut;         // XY horizontal, Z height, W reserved
+
+// =============================================================================
+// Hash / Gaussian helpers
+// =============================================================================
+float OceanFFTHash(uint2 P, uint Seed)
+{
+	uint H = P.x * 374761393u + P.y * 668265263u + Seed * 2147483647u;
+	H = (H ^ (H >> 13u)) * 1274126177u;
+	H = H ^ (H >> 16u);
+	return float(H & 0x00FFFFFFu) / float(0x01000000u); // [0, 1)
+}
+
+float2 OceanFFTGaussian(uint2 P, uint Seed)
+{
+	float U1 = max(OceanFFTHash(P, Seed), 1e-6);
+	float U2 = OceanFFTHash(P, Seed + 1u);
+	float R  = sqrt(-2.0 * log(U1));
+	float A  = OCEAN_FFT_TWOPI * U2;
+	return float2(R * cos(A), R * sin(A));
+}
+
+float2 OceanFFTComplexMul(float2 A, float2 B)
+{
+	return float2(A.x * B.x - A.y * B.y, A.x * B.y + A.y * B.x);
+}
+
+// Phillips spectrum (deep-water wind-wave model) - computed in SI units (meters, m/s).
+// This is still a simple spectrum; later quality work should add JONSWAP/TMA, fetch, and
+// multi-cascade blending. It is good enough as a physically readable base spectrum.
+float OceanFFTPhillipsSI(float2 K_si, float Magnitude_si, float WindSpeed_si)
+{
+	if (Magnitude_si < 1e-4) return 0.0;
+
+	const float G_SI = 9.81;
+	float V = max(WindSpeed_si, 12.0);
+	float L = (V * V) / G_SI;
+	float KL = Magnitude_si * L;
+	float KL2 = max(KL * KL, 1e-3);
+
+	float K2 = Magnitude_si * Magnitude_si;
+	float K4 = K2 * K2;
+
+	float2 Khat = K_si / Magnitude_si;
+	float WindAlignment = dot(Khat, FFTWindDir);
+	float Align = WindAlignment * WindAlignment;
+
+	// Keep some cross/against-wind energy so the surface is not a one-dimensional stripe.
+	if (WindAlignment < 0.0) Align *= 0.07;
+	Align = max(Align, 0.025);
+
+	// Small-wave damping: cut off everything below roughly 1m wavelength.
+	const float SmallWave = 0.5;
+	float Damp = exp(-K2 * SmallWave * SmallWave);
+
+	const float A = 0.0008;
+	return A * exp(-1.0 / KL2) / K4 * Align * Damp;
+}
+
+// =============================================================================
+// PASS 1: InitSpectrumCS - build complex spectra per cell
+// =============================================================================
+[numthreads(8, 8, 1)]
+void InitSpectrumCS(uint3 DTid : SV_DispatchThreadID)
+{
+	uint2 ID = DTid.xy;
+	if (ID.x >= OCEAN_FFT_N || ID.y >= OCEAN_FFT_N) return;
+
+	int Nh = OCEAN_FFT_N / 2;
+	int2 KIdx;
+	KIdx.x = (int(ID.x) <= Nh) ? int(ID.x) : (int(ID.x) - OCEAN_FFT_N);
+	KIdx.y = (int(ID.y) <= Nh) ? int(ID.y) : (int(ID.y) - OCEAN_FFT_N);
+
+	float TileSize_m = max(FFTTileSize, 1.0) * 0.01;
+	float WindSpeed_si = max(FFTWindSpeed, 1.0) * 0.01;
+	float2 K_si = OCEAN_FFT_TWOPI * float2(KIdx) / TileSize_m;
+	float KMag_si = length(K_si);
+
+	uint2 NID = uint2((OCEAN_FFT_N - ID.x) % OCEAN_FFT_N, (OCEAN_FFT_N - ID.y) % OCEAN_FFT_N);
+
+	// Use the same seed for H0(k) and H0(-k) lookup. The previous seed offset broke the
+	// Hermitian pairing, which made the real part look more like arbitrary procedural math.
+	float2 G  = OceanFFTGaussian(ID, FFTSpectrumSeed);
+	float2 Gn = OceanFFTGaussian(NID, FFTSpectrumSeed);
+
+	float Ph_pos = sqrt(max(OceanFFTPhillipsSI( K_si, KMag_si, WindSpeed_si) * 0.5, 0.0));
+	float Ph_neg = sqrt(max(OceanFFTPhillipsSI(-K_si, KMag_si, WindSpeed_si) * 0.5, 0.0));
+	float2 H0_pos = G  * Ph_pos;
+	float2 H0_neg = Gn * Ph_neg;
+
+	const float G_SI = 9.81;
+	float Omega = sqrt(G_SI * KMag_si);
+	float CosOt = cos(Omega * FFTTime);
+	float SinOt = sin(Omega * FFTTime);
+
+	float2 H0_neg_conj = float2(H0_neg.x, -H0_neg.y);
+	float2 Term1 = OceanFFTComplexMul(H0_pos, float2(CosOt, SinOt));
+	float2 Term2 = OceanFFTComplexMul(H0_neg_conj, float2(CosOt, -SinOt));
+	float2 H = Term1 + Term2;
+
+	const float MetersToCm = 100.0;
+	const float InvN = 1.0 / float(OCEAN_FFT_N);
+	H *= FFTAmplitudeScale * MetersToCm * InvN;
+
+	float2 Khat = (KMag_si > 1e-4) ? (K_si / KMag_si) : float2(0.0, 0.0);
+	float2 MinusIH = float2(H.y, -H.x) * max(FFTChoppiness, 0.0);
+
+	SpectrumHeightOut[ID] = H;
+	SpectrumDisplacementXOut[ID] = Khat.x * MinusIH;
+	SpectrumDisplacementYOut[ID] = Khat.y * MinusIH;
+}
+
+// =============================================================================
+// PASS 2 & 3: 1D inverse FFT for height + horizontal displacement
+// =============================================================================
+
+groupshared float2 OceanFFTHeightBuffer[OCEAN_FFT_N];
+groupshared float2 OceanFFTDisplacementXBuffer[OCEAN_FFT_N];
+groupshared float2 OceanFFTDisplacementYBuffer[OCEAN_FFT_N];
+
+uint OceanFFTBitReverse(uint x)
+{
+	uint y = 0;
+	[unroll] for (uint b = 0u; b < OCEAN_FFT_LOG2_N; ++b)
+	{
+		y |= ((x >> b) & 1u) << (OCEAN_FFT_LOG2_N - 1u - b);
+	}
+	return y;
+}
+
+void OceanFFTButterfly(inout float2 A, inout float2 B, float2 W)
+{
+	float2 E = A;
+	float2 O = B;
+	float2 WO = OceanFFTComplexMul(W, O);
+	A = E + WO;
+	B = E - WO;
+}
+
+void OceanFFTPerformInverse(uint TID)
+{
+	GroupMemoryBarrierWithGroupSync();
+
+	[loop]
+	for (uint stage = 0u; stage < OCEAN_FFT_LOG2_N; ++stage)
+	{
+		uint M  = 1u << stage;
+		uint M2 = M << 1u;
+		uint Group = TID / M2;
+		uint K = TID & (M - 1u);
+		float Angle = OCEAN_FFT_TWOPI * float(K) / float(M2);
+		float2 W = float2(cos(Angle), sin(Angle));
+
+		uint EvenIdx = Group * M2 + K;
+		uint OddIdx  = EvenIdx + M;
+		if ((TID & M) == 0u && TID == EvenIdx)
+		{
+			OceanFFTButterfly(OceanFFTHeightBuffer[EvenIdx], OceanFFTHeightBuffer[OddIdx], W);
+			OceanFFTButterfly(OceanFFTDisplacementXBuffer[EvenIdx], OceanFFTDisplacementXBuffer[OddIdx], W);
+			OceanFFTButterfly(OceanFFTDisplacementYBuffer[EvenIdx], OceanFFTDisplacementYBuffer[OddIdx], W);
+		}
+		GroupMemoryBarrierWithGroupSync();
+	}
+}
+
+[numthreads(OCEAN_FFT_N, 1, 1)]
+void FFTRowCS(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3 GID : SV_GroupID)
+{
+	uint TID = GTid.x;
+	uint Row = GID.x;
+	uint Src = OceanFFTBitReverse(TID);
+
+	OceanFFTHeightBuffer[TID] = SpectrumHeightInOut[uint2(Src, Row)];
+	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXInOut[uint2(Src, Row)];
+	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYInOut[uint2(Src, Row)];
+
+	OceanFFTPerformInverse(TID);
+
+	SpectrumHeightInOut[uint2(TID, Row)] = OceanFFTHeightBuffer[TID];
+	SpectrumDisplacementXInOut[uint2(TID, Row)] = OceanFFTDisplacementXBuffer[TID];
+	SpectrumDisplacementYInOut[uint2(TID, Row)] = OceanFFTDisplacementYBuffer[TID];
+}
+
+[numthreads(OCEAN_FFT_N, 1, 1)]
+void FFTColCS(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, uint3 GID : SV_GroupID)
+{
+	uint TID = GTid.x;
+	uint Col = GID.x;
+	uint Src = OceanFFTBitReverse(TID);
+
+	OceanFFTHeightBuffer[TID] = SpectrumHeightInOut[uint2(Col, Src)];
+	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXInOut[uint2(Col, Src)];
+	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYInOut[uint2(Col, Src)];
+
+	OceanFFTPerformInverse(TID);
+
+	DisplacementMapOut[uint2(Col, TID)] = float4(
+		OceanFFTDisplacementXBuffer[TID].x,
+		OceanFFTDisplacementYBuffer[TID].x,
+		OceanFFTHeightBuffer[TID].x,
+		0.0);
+}

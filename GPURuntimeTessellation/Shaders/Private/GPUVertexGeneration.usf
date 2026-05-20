@@ -39,21 +39,29 @@ RWStructuredBuffer<float2> OutputUVs;
 
 /**
  * Main compute shader entry point
- * Generates a uniform grid of vertices
- * Thread group: 8x8x1
+ * Generates a uniform grid of vertices using LINEAR 1D dispatch.
+ * Each thread covers exactly one vertex slot - every index in [0, ResX*ResY) is reached.
+ *
+ * NOTE: this used to be a 2D dispatch (8x8) using x/y thread coords with two-axis
+ * bounds checks. That triggered a driver/compiler edge case where the corner thread
+ * (last X, last Y) silently failed to write any of its 3 UAVs (position/normal/UV),
+ * leaving the corner vertex at the buffer's cleared value (0,0,0) - visible in lit
+ * mode as a vertex collapsed to the pivot. Linear dispatch matches displacement/normal
+ * passes and eliminates the issue.
  */
-[numthreads(THREADGROUP_SIZE_X, THREADGROUP_SIZE_Y, 1)]
+[numthreads(THREADGROUP_SIZE, 1, 1)]
 void GenerateVertices(uint3 ThreadId : SV_DispatchThreadID)
 {
-	uint x = ThreadId.x;
-	uint y = ThreadId.y;
-	
-	// Check bounds
-	if (x >= ResolutionX || y >= ResolutionY)
+	uint VertexIndex = ThreadId.x;
+	uint TotalVerts = ResolutionX * ResolutionY;
+
+	// Single linear bounds check
+	if (VertexIndex >= TotalVerts)
 		return;
-	
-	// Calculate vertex index
-	uint VertexIndex = y * ResolutionX + x;
+
+	// Reconstruct 2D grid coordinates from linear index
+	uint x = VertexIndex % ResolutionX;
+	uint y = VertexIndex / ResolutionX;
 	
 	// Calculate local UV coordinates within this patch (0 to 1)
 	// Guard against any precision mishaps on boundary (ensure exact 0..1 range)

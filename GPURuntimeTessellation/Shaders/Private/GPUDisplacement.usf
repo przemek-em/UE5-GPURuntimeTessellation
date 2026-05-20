@@ -21,24 +21,401 @@ float DisplacementOffset;
 uint bUseSineWaveDisplacement;
 uint bHasRVTMask;
 uint VertexCount;
+float4x4 WorldToLocal;
+
+// Vector displacement path (0=disabled). Space: 0=Local, 1=World, 2=Tangent.
+uint bUseVectorDisplacement;
+uint VectorDisplacementSpace;
+uint VectorDisplacementDecodeMode;
+uint bUseVectorDisplacementAlphaAsStrength;
+uint bAddScalarHeightDisplacementToVector;
+float3 VectorDisplacementScale;
+float3 VectorDisplacementBias;
+float VectorDisplacementIntensity;
+
+// ----- Procedural ocean -----
+// 0=Disabled, 1=Gerstner, 2=FFT/Tessendorf, 3=PerlinFBM
+uint OceanWaveMode;
+uint OceanGerstnerWaveCount;
+float OceanTime;
+float OceanPlaneSizeX;
+float OceanPlaneSizeY;
+// PackA = (DirX, DirY, Wavelength, Speed)
+// PackB = (Amplitude, Steepness, PhaseOffset, _padding)
+float4 OceanGerstnerPackA[8];
+float4 OceanGerstnerPackB[8];
+// Perlin / fBm
+float OceanPerlinFrequency;
+uint OceanPerlinOctaves;
+float OceanPerlinPersistence;
+float OceanPerlinLacunarity;
+float2 OceanPerlinFlow;
+
+// FFT displacement map (active when OceanWaveMode == 2). Built per frame by GPUOceanFFT.usf.
+float OceanFFTTileSize;
+float OceanFFTWindSpeed;
+float2 OceanFFTWindDir;
+uint OceanFFTMotionMode;
+float OceanFFTSwayIntensity;
+float OceanFFTSwayRate;
+float OceanFFTSwayDrift;
+Texture2D<float4> OceanFFTDisplacementMap;
+SamplerState OceanFFTDisplacementMapSampler;
 
 // UV remapping for patch rendering
 float2 UVOffset;
 float2 UVScale;
 
 // Texture resources
-Texture2D DisplacementTexture;
-SamplerState DisplacementSampler;
+Texture2D<float> DisplacementTexture;
+Texture2D<float4> VectorDisplacementTexture;
 Texture2D RVTMaskTexture;
 SamplerState RVTMaskSampler;
 
-// Input buffers
-StructuredBuffer<float3> InputPositions;
+// Input buffers (positions are read directly from OutputPositions to avoid
+// aliasing the same buffer as both SRV and UAV inside a single RDG pass).
 StructuredBuffer<float3> InputNormals;
 StructuredBuffer<float2> InputUVs;
 
-// Output buffer
+// Output buffer (also serves as the position input - each thread only ever
+// reads and writes its own slot, so read-modify-write on the UAV is safe).
 RWStructuredBuffer<float3> OutputPositions;
+
+// =============================================================================
+// Procedural ocean: Gerstner + Perlin fBm. Both return world-unit height; the caller
+// branches around the standard DisplacementIntensity remap when ocean is active.
+// =============================================================================
+
+float OceanGerstnerSum(float2 RemappedUV)
+{
+	// Map normalized UV (0..1 across the plane) to local-space XY in cm.
+	float2 LocalXY = float2(
+		(RemappedUV.x - 0.5) * OceanPlaneSizeX,
+		(RemappedUV.y - 0.5) * OceanPlaneSizeY
+	);
+
+	float Height = 0.0;
+	uint Count = min(OceanGerstnerWaveCount, 8u);
+
+	[loop]
+	for (uint i = 0u; i < Count; ++i)
+	{
+		float4 PackA = OceanGerstnerPackA[i];
+		float4 PackB = OceanGerstnerPackB[i];
+		float2 Dir = PackA.xy;
+		float Wavelength = max(PackA.z, 1.0);
+		float Speed = PackA.w;
+		float Amplitude = PackB.x;
+		float Steepness = saturate(PackB.y);
+		float PhaseOffset = PackB.z;
+
+		float W = 6.2831853 / Wavelength; // angular wavenumber 2pi/L
+		float Phase = W * (dot(Dir, LocalXY) - Speed * OceanTime) + PhaseOffset;
+
+		// Vertical-only Gerstner approximation: trochoidal sharpening via cos^k for steepness > 0,
+		// linear sin otherwise. Keeps the existing grid topology intact (no XY displacement).
+		float C = cos(Phase);
+		float S = sin(Phase);
+		float Sharpened = (Steepness > 0.001) ? sign(S) * pow(abs(S), 1.0 + Steepness * 2.0) : S;
+		Height += Amplitude * Sharpened;
+		// (C kept available so the compiler doesn't deadcode the cos call - tiny perf hit, none
+		//  in practice; future foam/spray output can use C directly.)
+		Height += 0.0 * C;
+	}
+	return Height;
+}
+
+// =============================================================================
+// True 3D gradient noise (Perlin-style). MUCH smoother than value noise: instead of
+// hashing a scalar at each lattice corner and interpolating, we hash a 3D GRADIENT vector
+// at each corner and interpolate dot(gradient, offset). Combined with quintic smoothing
+// (6t^5 - 15t^4 + 10t^3, the standard Perlin Hermite blend) this eliminates the blocky
+// "value-noise checkerboard" look the user reported.
+//
+// Time is sampled as the Z axis with per-octave rate variation so the field morphs in
+// place instead of sliding past the camera.
+// =============================================================================
+
+uint OceanGradHashU(uint3 P, uint Salt)
+{
+	uint H = P.x * 374761393u + P.y * 668265263u + P.z * 1274126177u + Salt * 2147483647u;
+	H = (H ^ (H >> 13u)) * 1274126177u;
+	H ^= H >> 16u;
+	return H;
+}
+
+// 16 well-distributed 3D gradient vectors (Perlin's "improved noise" gradient set).
+float3 OceanGrad3D(uint3 P)
+{
+	uint H = OceanGradHashU(P, 0u) & 15u;
+	float u = (H < 8u) ? P.x : P.y;          // dummy; replaced by branch below
+	// Branchless gradient table via bit-pattern lookup. Six edges of cube + repeats = 16.
+	float3 g;
+	[branch]
+	switch (H)
+	{
+		case  0u: g = float3( 1, 1, 0); break;
+		case  1u: g = float3(-1, 1, 0); break;
+		case  2u: g = float3( 1,-1, 0); break;
+		case  3u: g = float3(-1,-1, 0); break;
+		case  4u: g = float3( 1, 0, 1); break;
+		case  5u: g = float3(-1, 0, 1); break;
+		case  6u: g = float3( 1, 0,-1); break;
+		case  7u: g = float3(-1, 0,-1); break;
+		case  8u: g = float3( 0, 1, 1); break;
+		case  9u: g = float3( 0,-1, 1); break;
+		case 10u: g = float3( 0, 1,-1); break;
+		case 11u: g = float3( 0,-1,-1); break;
+		case 12u: g = float3( 1, 1, 0); break;
+		case 13u: g = float3(-1, 1, 0); break;
+		case 14u: g = float3( 0,-1, 1); break;
+		default : g = float3( 0,-1,-1); break;
+	}
+	return g;
+}
+
+float OceanPerlinNoise3D(float3 P)
+{
+	float3 Pi = floor(P);
+	float3 Pf = frac(P);
+	uint3 I = uint3(int3(Pi)); // wrap negative ints into uint domain - hash doesn't care
+
+	// Quintic Hermite blend: smoother than smoothstep, zero 1st AND 2nd derivative at lattice.
+	float3 W = Pf * Pf * Pf * (Pf * (Pf * 6.0 - 15.0) + 10.0);
+
+	// Eight corner gradients dotted with the offset from each corner to P.
+	float n000 = dot(OceanGrad3D(I + uint3(0,0,0)), Pf - float3(0,0,0));
+	float n100 = dot(OceanGrad3D(I + uint3(1,0,0)), Pf - float3(1,0,0));
+	float n010 = dot(OceanGrad3D(I + uint3(0,1,0)), Pf - float3(0,1,0));
+	float n110 = dot(OceanGrad3D(I + uint3(1,1,0)), Pf - float3(1,1,0));
+	float n001 = dot(OceanGrad3D(I + uint3(0,0,1)), Pf - float3(0,0,1));
+	float n101 = dot(OceanGrad3D(I + uint3(1,0,1)), Pf - float3(1,0,1));
+	float n011 = dot(OceanGrad3D(I + uint3(0,1,1)), Pf - float3(0,1,1));
+	float n111 = dot(OceanGrad3D(I + uint3(1,1,1)), Pf - float3(1,1,1));
+
+	float Nx00 = lerp(n000, n100, W.x);
+	float Nx10 = lerp(n010, n110, W.x);
+	float Nx01 = lerp(n001, n101, W.x);
+	float Nx11 = lerp(n011, n111, W.x);
+	float Nxy0 = lerp(Nx00, Nx10, W.y);
+	float Nxy1 = lerp(Nx01, Nx11, W.y);
+	return lerp(Nxy0, Nxy1, W.z); // approximately [-1, 1]
+}
+
+float OceanPerlinFBM(float2 RemappedUV)
+{
+	float2 LocalXY = float2(
+		(RemappedUV.x - 0.5) * OceanPlaneSizeX,
+		(RemappedUV.y - 0.5) * OceanPlaneSizeY
+	);
+
+	// Optional small directional bias - keeps the OceanPerlinFlow user knob meaningful as a
+	// "current" / "drift" without making it the dominant motion.
+	LocalXY -= OceanPerlinFlow * OceanTime * 0.25;
+
+	float P = OceanPerlinFrequency;
+	float Amp = 1.0;
+	float Sum = 0.0;
+	float Norm = 0.0;
+	uint Octaves = clamp(OceanPerlinOctaves, 1u, 8u);
+
+	[loop]
+	for (uint i = 0u; i < Octaves; ++i)
+	{
+		// Each octave evolves at a slightly different rate and offset on the Z axis so they
+		// don't morph in lockstep; this is what makes the surface look "alive".
+		float ZAxis = OceanTime * (0.6 + 0.35 * (float)i) + (float)i * 17.13;
+		Sum += Amp * OceanPerlinNoise3D(float3(LocalXY * P, ZAxis * P));
+		Norm += Amp;
+		Amp *= OceanPerlinPersistence;
+		P *= OceanPerlinLacunarity;
+	}
+	// Normalize to roughly [-1, 1] and scale by DisplacementIntensity for unit consistency.
+	return (Sum / max(Norm, 0.0001)) * DisplacementIntensity;
+}
+
+float2 OceanSafeNormalize2(float2 V, float2 Fallback)
+{
+	float LenSq = dot(V, V);
+	return (LenSq > 1e-6) ? (V * rsqrt(LenSq)) : Fallback;
+}
+
+float4 SampleOceanFFTDisplacement(float2 LocalXY)
+{
+	float TileSize = max(OceanFFTTileSize, 1.0);
+	float2 SampleXY = LocalXY;
+	float AmplitudeScale = 1.0;
+
+	if (OceanFFTMotionMode == 1u)
+	{
+		float SwayStrength = clamp(OceanFFTSwayIntensity, 0.0, 2.0);
+		if (SwayStrength > 1e-4)
+		{
+			float2 Wind = OceanSafeNormalize2(OceanFFTWindDir, float2(1.0, 0.0));
+			float2 CrossWind = float2(-Wind.y, Wind.x);
+			float Phase = OceanTime * max(OceanFFTSwayRate, 0.001) * 6.2831853;
+			float FlowDistance = max(OceanFFTWindSpeed, 1.0) * max(OceanFFTSwayDrift, 0.0) * OceanTime;
+
+			// Low-frequency wave groups. The effect is intentionally larger than FFT texels but
+			// smaller than the whole tile, so rough-sea motion happens in local patches instead
+			// of translating the entire displacement map as one sheet.
+			float GroupScaleA = max(TileSize * 0.18, 1500.0);
+			float GroupScaleB = max(TileSize * 0.071, 900.0);
+			float3 GroupPA = float3((LocalXY - Wind * FlowDistance) / GroupScaleA, OceanTime * max(OceanFFTSwayRate, 0.001) * 0.37);
+			float3 GroupPB = float3((LocalXY + CrossWind * FlowDistance * 0.43 + float2(371.0, 193.0)) / GroupScaleB, OceanTime * max(OceanFFTSwayRate, 0.001) * 0.61 + 11.7);
+			float GroupA = OceanPerlinNoise3D(GroupPA);
+			float GroupB = OceanPerlinNoise3D(GroupPB);
+
+			float LocalPhase = Phase + GroupA * 2.4 + GroupB * 1.1;
+			float Surge = sin(LocalPhase) + 0.38 * sin(LocalPhase * 2.13 + GroupB * 3.0 + 1.2);
+			float LocalSet = saturate(0.5 + 0.5 * (0.72 * GroupA + 0.28 * GroupB));
+
+			float ForwardWarp = TileSize * 0.010 * SwayStrength * Surge * (0.35 + 0.65 * LocalSet);
+			float CrossWarp = TileSize * 0.0035 * SwayStrength * GroupB;
+			SampleXY += Wind * ForwardWarp + CrossWind * CrossWarp;
+
+			AmplitudeScale = max(0.65, 1.0 + SwayStrength * 0.16 * (LocalSet - 0.5) + SwayStrength * 0.045 * Surge);
+		}
+	}
+
+	float2 TiledUV = frac(SampleXY / TileSize);
+	float4 FFT = OceanFFTDisplacementMap.SampleLevel(OceanFFTDisplacementMapSampler, TiledUV, 0);
+	FFT.xyz *= AmplitudeScale;
+	return FFT;
+}
+
+float SampleHeightTextureLinear(Texture2D<float> HeightTexture, float2 UV)
+{
+	uint Width;
+	uint Height;
+	HeightTexture.GetDimensions(Width, Height);
+	if (Width == 0u || Height == 0u)
+	{
+		return 1.0;
+	}
+
+	float2 TexelCoord = saturate(UV) * float2((float)Width, (float)Height) - 0.5;
+	float2 BaseFloat = floor(TexelCoord);
+	int2 Base = int2(BaseFloat);
+	float2 Blend = TexelCoord - BaseFloat;
+	int2 MaxCoord = int2((int)Width - 1, (int)Height - 1);
+
+	int2 Coord00 = min(max(Base, int2(0, 0)), MaxCoord);
+	int2 Coord10 = min(max(Base + int2(1, 0), int2(0, 0)), MaxCoord);
+	int2 Coord01 = min(max(Base + int2(0, 1), int2(0, 0)), MaxCoord);
+	int2 Coord11 = min(max(Base + int2(1, 1), int2(0, 0)), MaxCoord);
+
+	float H00 = HeightTexture.Load(int3(Coord00, 0));
+	float H10 = HeightTexture.Load(int3(Coord10, 0));
+	float H01 = HeightTexture.Load(int3(Coord01, 0));
+	float H11 = HeightTexture.Load(int3(Coord11, 0));
+
+	float H0 = lerp(H00, H10, Blend.x);
+	float H1 = lerp(H01, H11, Blend.x);
+	return lerp(H0, H1, Blend.y);
+}
+
+float4 SampleVectorDisplacementTextureLinear(Texture2D<float4> Texture, float2 UV)
+{
+	uint Width;
+	uint Height;
+	Texture.GetDimensions(Width, Height);
+	if (Width == 0u || Height == 0u)
+	{
+		return float4(0.0, 0.0, 0.0, 1.0);
+	}
+
+	float2 TexelCoord = saturate(UV) * float2((float)Width, (float)Height) - 0.5;
+	float2 BaseFloat = floor(TexelCoord);
+	int2 Base = int2(BaseFloat);
+	float2 Blend = TexelCoord - BaseFloat;
+	int2 MaxCoord = int2((int)Width - 1, (int)Height - 1);
+
+	int2 Coord00 = min(max(Base, int2(0, 0)), MaxCoord);
+	int2 Coord10 = min(max(Base + int2(1, 0), int2(0, 0)), MaxCoord);
+	int2 Coord01 = min(max(Base + int2(0, 1), int2(0, 0)), MaxCoord);
+	int2 Coord11 = min(max(Base + int2(1, 1), int2(0, 0)), MaxCoord);
+
+	float4 V00 = Texture.Load(int3(Coord00, 0));
+	float4 V10 = Texture.Load(int3(Coord10, 0));
+	float4 V01 = Texture.Load(int3(Coord01, 0));
+	float4 V11 = Texture.Load(int3(Coord11, 0));
+
+	float4 V0 = lerp(V00, V10, Blend.x);
+	float4 V1 = lerp(V01, V11, Blend.x);
+	return lerp(V0, V1, Blend.y);
+}
+
+float3 DecodeVectorDisplacementSample(float4 Sample)
+{
+	float3 Decoded = Sample.rgb;
+
+	// 1 = 0..1 encoded where 0.5 means no displacement.
+	if (VectorDisplacementDecodeMode == 1u)
+	{
+		Decoded = Decoded * 2.0 - 1.0;
+	}
+
+	float Strength = bUseVectorDisplacementAlphaAsStrength != 0u ? Sample.a : 1.0;
+	return (Decoded * VectorDisplacementScale + VectorDisplacementBias) * VectorDisplacementIntensity * Strength;
+}
+
+float3 EvaluateVectorDisplacementOffset(float2 RemappedUV, float3 BaseNormal)
+{
+	float4 Sample = SampleVectorDisplacementTextureLinear(VectorDisplacementTexture, RemappedUV);
+	float3 Offset = DecodeVectorDisplacementSample(Sample);
+
+	if (VectorDisplacementSpace == 1u)
+	{
+		return mul(float4(Offset, 0.0), WorldToLocal).xyz;
+	}
+
+	if (VectorDisplacementSpace == 2u)
+	{
+		float3 TangentX = float3(1.0, 0.0, 0.0);
+		float3 TangentY = float3(0.0, 1.0, 0.0);
+		return TangentX * Offset.x + TangentY * Offset.y + BaseNormal * Offset.z;
+	}
+
+	return Offset;
+}
+
+float EvaluateOceanHeight(float2 RemappedUV)
+{
+	if (OceanWaveMode == 1u)
+	{
+		return OceanGerstnerSum(RemappedUV);
+	}
+	if (OceanWaveMode == 2u)
+	{
+		// FFT mode: sample the per-frame Tessendorf IFFT displacement map. The texture tiles
+		// infinitely via frac(WorldXY / FFTTileSize). FFTTileSize is the physical period
+		// of the spectrum (independent of plane size, so the same texture can cover any
+		// PlaneSize via repetition).
+		float2 LocalXY = float2(
+			(RemappedUV.x - 0.5) * OceanPlaneSizeX,
+			(RemappedUV.y - 0.5) * OceanPlaneSizeY);
+		return SampleOceanFFTDisplacement(LocalXY).z;
+	}
+	if (OceanWaveMode == 3u)
+	{
+		return OceanPerlinFBM(RemappedUV);
+	}
+	return 0.0;
+}
+
+float3 EvaluateOceanOffset(float2 RemappedUV)
+{
+	if (OceanWaveMode == 2u)
+	{
+		float2 LocalXY = float2(
+			(RemappedUV.x - 0.5) * OceanPlaneSizeX,
+			(RemappedUV.y - 0.5) * OceanPlaneSizeY);
+		return SampleOceanFFTDisplacement(LocalXY).xyz;
+	}
+
+	return float3(0.0, 0.0, EvaluateOceanHeight(RemappedUV));
+}
 
 /**
  * Sample displacement value from texture or procedural function
@@ -46,8 +423,15 @@ RWStructuredBuffer<float3> OutputPositions;
  */
 float SampleDisplacement(float2 RemappedUV)
 {
+	// Procedural ocean takes precedence when active. Returns world-unit height directly
+	// (NOT 0-1), so when ocean is on the caller applies the vector offset directly.
+	if (OceanWaveMode != 0u)
+	{
+		return EvaluateOceanHeight(RemappedUV);
+	}
+
 	float Height = 0.0;
-	
+
 	if (bUseSineWaveDisplacement)
 	{
 		// Procedural sine wave for testing (use remapped UV)
@@ -55,10 +439,10 @@ float SampleDisplacement(float2 RemappedUV)
 	}
 	else
 	{
-		// Sample from displacement texture (single channel, R component)
-		// Using SampleLevel to avoid mip issues in compute shader
-		float4 TextureSample = DisplacementTexture.SampleLevel(DisplacementSampler, RemappedUV, 0);
-		Height = TextureSample.r;
+		// Manual linear reconstruction keeps G8/G16 grayscale and R16F height textures on
+		// the same sampling path. Some single-channel formats do not behave identically
+		// through hardware SampleLevel filtering on all RHIs.
+		Height = SampleHeightTextureLinear(DisplacementTexture, RemappedUV);
 		
 		// Apply RVT mask if available
 		if (bHasRVTMask)
@@ -84,8 +468,9 @@ void ApplyDisplacement(uint3 ThreadId : SV_DispatchThreadID)
 	if (VertexIndex >= VertexCount)
 		return;
 	
-	// Load vertex data
-	float3 Position = InputPositions[VertexIndex];
+	// Load vertex data. Position comes from the UAV (read-modify-write on the same
+	// slot is well-defined) so we never bind the position buffer as both SRV and UAV.
+	float3 Position = OutputPositions[VertexIndex];
 	float3 Normal = InputNormals[VertexIndex];
 	float2 UV = InputUVs[VertexIndex];
 	
@@ -98,12 +483,36 @@ void ApplyDisplacement(uint3 ThreadId : SV_DispatchThreadID)
 	// NEW (CORRECT): Use UV directly
 	float2 RemappedUV = UV;
 	
+	if (OceanWaveMode != 0u)
+	{
+		float3 OceanOffset = EvaluateOceanOffset(RemappedUV);
+		OceanOffset.z += DisplacementOffset;
+		OutputPositions[VertexIndex] = Position + OceanOffset;
+		return;
+	}
+
+	if (bUseVectorDisplacement != 0u)
+	{
+		float3 VectorOffset = EvaluateVectorDisplacementOffset(RemappedUV, Normal);
+		float3 DisplacedPosition = Position + VectorOffset;
+
+		if (bAddScalarHeightDisplacementToVector != 0u)
+		{
+			float ScalarDisplacement = SampleDisplacement(RemappedUV);
+			ScalarDisplacement = ScalarDisplacement * DisplacementIntensity + DisplacementOffset;
+			DisplacedPosition += Normal * ScalarDisplacement;
+		}
+
+		OutputPositions[VertexIndex] = DisplacedPosition;
+		return;
+	}
+
 	// Sample displacement
 	float Displacement = SampleDisplacement(RemappedUV);
-	
-	// Apply intensity and offset
+
+	// Apply intensity and offset.
 	Displacement = Displacement * DisplacementIntensity + DisplacementOffset;
-	
+
 	// Apply displacement along normal
 	float3 DisplacedPosition = Position + Normal * Displacement;
 	

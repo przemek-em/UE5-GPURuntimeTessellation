@@ -8,6 +8,8 @@
 	2. Geometry-based calculation from adjacent triangles (accurate)
 	3. Hybrid method (blends 1 and 2 based on smoothing factor)
 	4. From normal map texture (highest quality, pre-baked)
+	5. Geometry + height texture detail (dynamic render target detail)
+	6. From height texture/render target (dynamic generated normal)
 	
 	Method 4 (From Normal Map):
 	- Samples pre-calculated normals from a normal map texture
@@ -26,20 +28,51 @@
 #include "/Engine/Private/Common.ush"
 
 // Parameters
-uint NormalCalculationMethod; // 0=Disabled, 1=FiniteDiff, 2=GeometryBased, 3=Hybrid, 4=FromNormalMap
+uint NormalCalculationMethod; // 0=Disabled, 1=FiniteDiff, 2=GeometryBased, 3=Hybrid, 4=FromNormalMap, 5=GeometryHeightTextureBlend, 6=FromHeightTexture
 float NormalSmoothingFactor;
+float NormalIntensity;
+float HeightTextureNormalDetailStrength;
+float HeightTextureNormalTexelStep;
 uint bInvertNormals;
 uint VertexCount;
 uint ResolutionX;
 uint ResolutionY;
-float TexelSize;
+float2 NormalUVStep;
 float PlaneSizeX;
 float PlaneSizeY;
 
 // Displacement texture for gradient-based normals
 Texture2D<float> DisplacementTexture;
-SamplerState DisplacementSampler;
 float DisplacementIntensity;
+
+// Mirrors GPUDisplacement: when set, height comes from the procedural sine wave so the
+// finite-difference / hybrid normal paths agree with the displaced positions.
+uint bUseSineWaveDisplacement;
+
+// Mirrors GPUDisplacement: procedural ocean inputs. See GPUDisplacement.usf for the full
+// definition - we re-implement the height evaluator below so finite-difference / hybrid
+// normals track the same waveform and the sea looks correctly lit.
+uint OceanWaveMode;
+uint OceanGerstnerWaveCount;
+float OceanTime;
+float4 OceanGerstnerPackA[8];
+float4 OceanGerstnerPackB[8];
+float OceanPerlinFrequency;
+uint OceanPerlinOctaves;
+float OceanPerlinPersistence;
+float OceanPerlinLacunarity;
+float2 OceanPerlinFlow;
+
+// Mirrors GPUDisplacement: FFT displacement map built per frame by GPUOceanFFT.usf.
+float OceanFFTTileSize;
+float OceanFFTWindSpeed;
+float2 OceanFFTWindDir;
+uint OceanFFTMotionMode;
+float OceanFFTSwayIntensity;
+float OceanFFTSwayRate;
+float OceanFFTSwayDrift;
+Texture2D<float4> OceanFFTDisplacementMap;
+SamplerState OceanFFTDisplacementMapSampler;
 
 // Subtract/mask texture (for correct normal calculation with RVT)
 uint bHasSubtractTexture;
@@ -58,22 +91,291 @@ StructuredBuffer<uint> InputIndices;
 // Output buffer
 RWStructuredBuffer<float3> OutputNormals;
 
+// =============================================================================
+// 3D gradient (Perlin) noise - MUST match GPUDisplacement.usf exactly so the normals
+// agree with the displaced positions. See that file for explanation.
+// =============================================================================
+uint OceanGradHashU(uint3 P, uint Salt)
+{
+	uint H = P.x * 374761393u + P.y * 668265263u + P.z * 1274126177u + Salt * 2147483647u;
+	H = (H ^ (H >> 13u)) * 1274126177u;
+	H ^= H >> 16u;
+	return H;
+}
+
+float3 OceanGrad3D(uint3 P)
+{
+	uint H = OceanGradHashU(P, 0u) & 15u;
+	float3 g;
+	[branch]
+	switch (H)
+	{
+		case  0u: g = float3( 1, 1, 0); break;
+		case  1u: g = float3(-1, 1, 0); break;
+		case  2u: g = float3( 1,-1, 0); break;
+		case  3u: g = float3(-1,-1, 0); break;
+		case  4u: g = float3( 1, 0, 1); break;
+		case  5u: g = float3(-1, 0, 1); break;
+		case  6u: g = float3( 1, 0,-1); break;
+		case  7u: g = float3(-1, 0,-1); break;
+		case  8u: g = float3( 0, 1, 1); break;
+		case  9u: g = float3( 0,-1, 1); break;
+		case 10u: g = float3( 0, 1,-1); break;
+		case 11u: g = float3( 0,-1,-1); break;
+		case 12u: g = float3( 1, 1, 0); break;
+		case 13u: g = float3(-1, 1, 0); break;
+		case 14u: g = float3( 0,-1, 1); break;
+		default : g = float3( 0,-1,-1); break;
+	}
+	return g;
+}
+
+float OceanPerlinNoise3D(float3 P)
+{
+	float3 Pi = floor(P);
+	float3 Pf = frac(P);
+	uint3 I = uint3(int3(Pi));
+	float3 W = Pf * Pf * Pf * (Pf * (Pf * 6.0 - 15.0) + 10.0); // quintic Hermite
+	float n000 = dot(OceanGrad3D(I + uint3(0,0,0)), Pf - float3(0,0,0));
+	float n100 = dot(OceanGrad3D(I + uint3(1,0,0)), Pf - float3(1,0,0));
+	float n010 = dot(OceanGrad3D(I + uint3(0,1,0)), Pf - float3(0,1,0));
+	float n110 = dot(OceanGrad3D(I + uint3(1,1,0)), Pf - float3(1,1,0));
+	float n001 = dot(OceanGrad3D(I + uint3(0,0,1)), Pf - float3(0,0,1));
+	float n101 = dot(OceanGrad3D(I + uint3(1,0,1)), Pf - float3(1,0,1));
+	float n011 = dot(OceanGrad3D(I + uint3(0,1,1)), Pf - float3(0,1,1));
+	float n111 = dot(OceanGrad3D(I + uint3(1,1,1)), Pf - float3(1,1,1));
+	float Nx00 = lerp(n000, n100, W.x);
+	float Nx10 = lerp(n010, n110, W.x);
+	float Nx01 = lerp(n001, n101, W.x);
+	float Nx11 = lerp(n011, n111, W.x);
+	float Nxy0 = lerp(Nx00, Nx10, W.y);
+	float Nxy1 = lerp(Nx01, Nx11, W.y);
+	return lerp(Nxy0, Nxy1, W.z);
+}
+
+float2 OceanSafeNormalize2(float2 V, float2 Fallback)
+{
+	float LenSq = dot(V, V);
+	return (LenSq > 1e-6) ? (V * rsqrt(LenSq)) : Fallback;
+}
+
+float4 SampleOceanFFTDisplacement(float2 LocalXY)
+{
+	float TileSize = max(OceanFFTTileSize, 1.0);
+	float2 SampleXY = LocalXY;
+	float AmplitudeScale = 1.0;
+
+	if (OceanFFTMotionMode == 1u)
+	{
+		float SwayStrength = clamp(OceanFFTSwayIntensity, 0.0, 2.0);
+		if (SwayStrength > 1e-4)
+		{
+			float2 Wind = OceanSafeNormalize2(OceanFFTWindDir, float2(1.0, 0.0));
+			float2 CrossWind = float2(-Wind.y, Wind.x);
+			float Phase = OceanTime * max(OceanFFTSwayRate, 0.001) * 6.2831853;
+			float FlowDistance = max(OceanFFTWindSpeed, 1.0) * max(OceanFFTSwayDrift, 0.0) * OceanTime;
+
+			float GroupScaleA = max(TileSize * 0.18, 1500.0);
+			float GroupScaleB = max(TileSize * 0.071, 900.0);
+			float3 GroupPA = float3((LocalXY - Wind * FlowDistance) / GroupScaleA, OceanTime * max(OceanFFTSwayRate, 0.001) * 0.37);
+			float3 GroupPB = float3((LocalXY + CrossWind * FlowDistance * 0.43 + float2(371.0, 193.0)) / GroupScaleB, OceanTime * max(OceanFFTSwayRate, 0.001) * 0.61 + 11.7);
+			float GroupA = OceanPerlinNoise3D(GroupPA);
+			float GroupB = OceanPerlinNoise3D(GroupPB);
+
+			float LocalPhase = Phase + GroupA * 2.4 + GroupB * 1.1;
+			float Surge = sin(LocalPhase) + 0.38 * sin(LocalPhase * 2.13 + GroupB * 3.0 + 1.2);
+			float LocalSet = saturate(0.5 + 0.5 * (0.72 * GroupA + 0.28 * GroupB));
+
+			float ForwardWarp = TileSize * 0.010 * SwayStrength * Surge * (0.35 + 0.65 * LocalSet);
+			float CrossWarp = TileSize * 0.0035 * SwayStrength * GroupB;
+			SampleXY += Wind * ForwardWarp + CrossWind * CrossWarp;
+
+			AmplitudeScale = max(0.65, 1.0 + SwayStrength * 0.16 * (LocalSet - 0.5) + SwayStrength * 0.045 * Surge);
+		}
+	}
+
+	float2 TiledUV = frac(SampleXY / TileSize);
+	float4 FFT = OceanFFTDisplacementMap.SampleLevel(OceanFFTDisplacementMapSampler, TiledUV, 0);
+	FFT.xyz *= AmplitudeScale;
+	return FFT;
+}
+
+float SampleHeightTextureLinear(Texture2D<float> HeightTexture, float2 UV)
+{
+	uint Width;
+	uint Height;
+	HeightTexture.GetDimensions(Width, Height);
+	if (Width == 0u || Height == 0u)
+	{
+		return 1.0;
+	}
+
+	float2 TexelCoord = saturate(UV) * float2((float)Width, (float)Height) - 0.5;
+	float2 BaseFloat = floor(TexelCoord);
+	int2 Base = int2(BaseFloat);
+	float2 Blend = TexelCoord - BaseFloat;
+	int2 MaxCoord = int2((int)Width - 1, (int)Height - 1);
+
+	int2 Coord00 = min(max(Base, int2(0, 0)), MaxCoord);
+	int2 Coord10 = min(max(Base + int2(1, 0), int2(0, 0)), MaxCoord);
+	int2 Coord01 = min(max(Base + int2(0, 1), int2(0, 0)), MaxCoord);
+	int2 Coord11 = min(max(Base + int2(1, 1), int2(0, 0)), MaxCoord);
+
+	float H00 = HeightTexture.Load(int3(Coord00, 0));
+	float H10 = HeightTexture.Load(int3(Coord10, 0));
+	float H01 = HeightTexture.Load(int3(Coord01, 0));
+	float H11 = HeightTexture.Load(int3(Coord11, 0));
+
+	float H0 = lerp(H00, H10, Blend.x);
+	float H1 = lerp(H01, H11, Blend.x);
+	return lerp(H0, H1, Blend.y);
+}
+
 /**
  * Sample displacement for normal calculation
  * Applies subtract/mask texture if present (same logic as displacement shader)
  */
 float SampleDisplacementForNormal(float2 UV)
 {
-	float Height = DisplacementTexture.SampleLevel(DisplacementSampler, UV, 0).r * DisplacementIntensity;
-	
-	// Apply subtract/mask texture if present (same as displacement shader)
+	float Height;
+
+	// Procedural ocean takes precedence over both the sine test path and the texture path,
+	// matching the branch order in GPUDisplacement.usf.
+	if (OceanWaveMode != 0u)
+	{
+		// PlaneSize is uploaded above for the finite-difference helper; reuse it here.
+		float2 LocalXY = float2((UV.x - 0.5) * PlaneSizeX, (UV.y - 0.5) * PlaneSizeY);
+
+		if (OceanWaveMode == 1u) // Gerstner
+		{
+			Height = 0.0;
+			uint Count = min(OceanGerstnerWaveCount, 8u);
+			[loop]
+			for (uint i = 0u; i < Count; ++i)
+			{
+				float4 PackA = OceanGerstnerPackA[i];
+				float4 PackB = OceanGerstnerPackB[i];
+				float2 Dir = PackA.xy;
+				float Wavelength = max(PackA.z, 1.0);
+				float Speed = PackA.w;
+				float Amplitude = PackB.x;
+				float Steepness = saturate(PackB.y);
+				float PhaseOffset = PackB.z;
+				float W = 6.2831853 / Wavelength;
+				float Phase = W * (dot(Dir, LocalXY) - Speed * OceanTime) + PhaseOffset;
+				float S = sin(Phase);
+				float Sharpened = (Steepness > 0.001) ? sign(S) * pow(abs(S), 1.0 + Steepness * 2.0) : S;
+				Height += Amplitude * Sharpened;
+			}
+		}
+		else if (OceanWaveMode == 2u) // FFT - sample displacement map height channel
+		{
+			Height = SampleOceanFFTDisplacement(LocalXY).z;
+		}
+		else // PerlinFBM (3D gradient noise: time as Z axis -> morphs in place, no treadmill)
+		{
+			LocalXY -= OceanPerlinFlow * OceanTime * 0.25;
+			float P = OceanPerlinFrequency;
+			float Amp = 1.0;
+			float Sum = 0.0;
+			float Norm = 0.0;
+			uint Octaves = clamp(OceanPerlinOctaves, 1u, 8u);
+			[loop]
+			for (uint i = 0u; i < Octaves; ++i)
+			{
+				float ZAxis = OceanTime * (0.6 + 0.35 * (float)i) + (float)i * 17.13;
+				Sum += Amp * OceanPerlinNoise3D(float3(LocalXY * P, ZAxis * P));
+				Norm += Amp;
+				Amp *= OceanPerlinPersistence;
+				P *= OceanPerlinLacunarity;
+			}
+			Height = (Sum / max(Norm, 0.0001)) * DisplacementIntensity;
+		}
+		return Height;
+	}
+
+	if (bUseSineWaveDisplacement)
+	{
+		// Match GPUDisplacement.usf exactly: Height = sin(u*10) * sin(v*10) * 0.5 + 0.5
+		// scaled by DisplacementIntensity. Without this branch the sine plane is shaded flat
+		// because DisplacementTexture has no relationship to the displaced positions.
+		Height = (sin(UV.x * 10.0) * sin(UV.y * 10.0) * 0.5 + 0.5) * DisplacementIntensity;
+	}
+	else
+	{
+		Height = SampleHeightTextureLinear(DisplacementTexture, UV) * DisplacementIntensity;
+
+		// Apply subtract/mask texture if present (same as displacement shader)
+		if (bHasSubtractTexture)
+		{
+			float Mask = SubtractTexture.SampleLevel(SubtractSampler, UV, 0).r;
+			Height *= (1.0 - Mask); // White mask = no displacement
+		}
+	}
+
+	return Height;
+}
+
+float SampleHeightTextureDetailForNormal(float2 UV)
+{
+	if (OceanWaveMode == 2u)
+	{
+		float2 LocalXY = float2((UV.x - 0.5) * PlaneSizeX, (UV.y - 0.5) * PlaneSizeY);
+		return SampleOceanFFTDisplacement(LocalXY).z;
+	}
+
+	float Height = SampleHeightTextureLinear(DisplacementTexture, UV) * DisplacementIntensity;
 	if (bHasSubtractTexture)
 	{
 		float Mask = SubtractTexture.SampleLevel(SubtractSampler, UV, 0).r;
-		Height *= (1.0 - Mask); // White mask = no displacement
+		Height *= (1.0 - Mask);
 	}
-	
 	return Height;
+}
+
+float2 GetHeightTextureDetailUVStep()
+{
+	uint Width = 0u;
+	uint Height = 0u;
+	if (OceanWaveMode == 2u)
+	{
+		OceanFFTDisplacementMap.GetDimensions(Width, Height);
+	}
+	else
+	{
+		DisplacementTexture.GetDimensions(Width, Height);
+	}
+
+	if (Width <= 1u || Height <= 1u)
+	{
+		return NormalUVStep;
+	}
+
+	float TexelStep = max(HeightTextureNormalTexelStep, 0.25);
+	return TexelStep / float2((float)Width, (float)Height);
+}
+
+float3 CalculateHeightTextureNormalAtStep(float2 UV, float2 DetailUVStep)
+{
+	float hL = SampleHeightTextureDetailForNormal(UV + float2(-DetailUVStep.x, 0));
+	float hR = SampleHeightTextureDetailForNormal(UV + float2(DetailUVStep.x, 0));
+	float hD = SampleHeightTextureDetailForNormal(UV + float2(0, -DetailUVStep.y));
+	float hU = SampleHeightTextureDetailForNormal(UV + float2(0, DetailUVStep.y));
+	float StepX = max(DetailUVStep.x * PlaneSizeX, 1.0e-4);
+	float StepY = max(DetailUVStep.y * PlaneSizeY, 1.0e-4);
+	float3 TangentX = float3(2.0 * StepX, 0, hR - hL);
+	float3 TangentY = float3(0, 2.0 * StepY, hU - hD);
+	return normalize(cross(TangentX, TangentY));
+}
+
+float3 CalculateHeightTextureDetailNormal(float2 UV)
+{
+	return CalculateHeightTextureNormalAtStep(UV, GetHeightTextureDetailUVStep());
+}
+
+float3 CalculateHeightTextureCoarseNormal(float2 UV)
+{
+	return CalculateHeightTextureNormalAtStep(UV, NormalUVStep);
 }
 
 /**
@@ -84,14 +386,14 @@ float SampleDisplacementForNormal(float2 UV)
 float3 CalculateNormalFiniteDifference(float2 UV, float PlaneSizeX, float PlaneSizeY)
 {
 	// Sample neighboring heights
-	float hL = SampleDisplacementForNormal(UV + float2(-TexelSize, 0));
-	float hR = SampleDisplacementForNormal(UV + float2(TexelSize, 0));
-	float hD = SampleDisplacementForNormal(UV + float2(0, -TexelSize));
-	float hU = SampleDisplacementForNormal(UV + float2(0, TexelSize));
+	float hL = SampleDisplacementForNormal(UV + float2(-NormalUVStep.x, 0));
+	float hR = SampleDisplacementForNormal(UV + float2(NormalUVStep.x, 0));
+	float hD = SampleDisplacementForNormal(UV + float2(0, -NormalUVStep.y));
+	float hU = SampleDisplacementForNormal(UV + float2(0, NormalUVStep.y));
 	
 	// Calculate world-space step sizes
-	float stepX = TexelSize * PlaneSizeX;
-	float stepY = TexelSize * PlaneSizeY;
+	float stepX = NormalUVStep.x * PlaneSizeX;
+	float stepY = NormalUVStep.y * PlaneSizeY;
 	
 	// Calculate tangent vectors in world space
 	// Tangent along X axis (left-right)
@@ -111,97 +413,57 @@ float3 CalculateNormalFiniteDifference(float2 UV, float PlaneSizeX, float PlaneS
  */
 float3 CalculateNormalFromGrid(uint x, uint y)
 {
-	uint VertexIndex = y * ResolutionX + x;
-	float3 Center = InputPositions[VertexIndex];
-	
-	float3 NormalSum = float3(0, 0, 0);
-	float WeightSum = 0.0;
-	
-	// Check all 4 adjacent quads (if they exist)
-	// Each vertex is part of up to 4 quads in a regular grid
-	
-	// Quad to the lower-left (if exists)
-	if (x > 0 && y > 0)
-	{
-		uint v0 = VertexIndex;
-		uint v1 = (y - 1) * ResolutionX + x;
-		uint v2 = (y - 1) * ResolutionX + (x - 1);
-		uint v3 = y * ResolutionX + (x - 1);
-		
-		float3 p0 = InputPositions[v0];
-		float3 p1 = InputPositions[v1];
-		float3 p2 = InputPositions[v2];
-		float3 p3 = InputPositions[v3];
-		
-		// Two triangles in this quad
-		float3 n1 = cross(p1 - p0, p3 - p0);
-		float3 n2 = cross(p3 - p0, p2 - p0);
-		
-		NormalSum += n1 + n2;
-		WeightSum += 2.0;
-	}
-	
-	// Quad to the lower-right (if exists)
-	if (x < ResolutionX - 1 && y > 0)
-	{
-		uint v0 = VertexIndex;
-		uint v1 = (y - 1) * ResolutionX + (x + 1);
-		uint v2 = (y - 1) * ResolutionX + x;
-		
-		float3 p0 = InputPositions[v0];
-		float3 p1 = InputPositions[v1];
-		float3 p2 = InputPositions[v2];
-		
-		float3 n1 = cross(p2 - p0, p1 - p0);
-		
-		NormalSum += n1;
-		WeightSum += 1.0;
-	}
-	
-	// Quad to the upper-right (if exists)
-	if (x < ResolutionX - 1 && y < ResolutionY - 1)
-	{
-		uint v0 = VertexIndex;
-		uint v1 = y * ResolutionX + (x + 1);
-		uint v2 = (y + 1) * ResolutionX + (x + 1);
-		uint v3 = (y + 1) * ResolutionX + x;
-		
-		float3 p0 = InputPositions[v0];
-		float3 p1 = InputPositions[v1];
-		float3 p2 = InputPositions[v2];
-		float3 p3 = InputPositions[v3];
-		
-		float3 n1 = cross(p1 - p0, p2 - p0);
-		float3 n2 = cross(p2 - p0, p3 - p0);
-		
-		NormalSum += n1 + n2;
-		WeightSum += 2.0;
-	}
-	
-	// Quad to the upper-left (if exists)
-	if (x > 0 && y < ResolutionY - 1)
-	{
-		uint v0 = VertexIndex;
-		uint v1 = (y + 1) * ResolutionX + x;
-		uint v2 = (y + 1) * ResolutionX + (x - 1);
-		
-		float3 p0 = InputPositions[v0];
-		float3 p1 = InputPositions[v1];
-		float3 p2 = InputPositions[v2];
-		
-		float3 n1 = cross(p1 - p0, p2 - p0);
-		
-		NormalSum += n1;
-		WeightSum += 1.0;
-	}
-	
-	// Average and normalize
-	if (WeightSum > 0.0)
-	{
-		return normalize(NormalSum / WeightSum);
-	}
-	
-	return float3(0, 0, 1); // Default up vector (Z-up for ground plane)
+	uint LeftX = (x > 0) ? (x - 1) : x;
+	uint RightX = (x + 1 < ResolutionX) ? (x + 1) : x;
+	uint DownY = (y > 0) ? (y - 1) : y;
+	uint UpY = (y + 1 < ResolutionY) ? (y + 1) : y;
+
+	float3 Left = InputPositions[y * ResolutionX + LeftX];
+	float3 Right = InputPositions[y * ResolutionX + RightX];
+	float3 Down = InputPositions[DownY * ResolutionX + x];
+	float3 Up = InputPositions[UpY * ResolutionX + x];
+
+	float3 TangentX = Right - Left;
+	float3 TangentY = Up - Down;
+	float3 Normal = cross(TangentX, TangentY);
+	float NormalLengthSq = dot(Normal, Normal);
+
+	return (NormalLengthSq > 1.0e-8) ? (Normal * rsqrt(NormalLengthSq)) : float3(0, 0, 1);
+}
+
+float3 ApplyGeneratedNormalIntensity(float3 Normal)
+{
+	float Strength = max(NormalIntensity, 0.0);
+	float3 Adjusted = float3(Normal.xy * Strength, Normal.z);
+	float LenSq = dot(Adjusted, Adjusted);
+	return (LenSq > 1.0e-8) ? (Adjusted * rsqrt(LenSq)) : float3(0, 0, 1);
+}
+
+float2 NormalToSlope(float3 Normal)
+{
+	float SafeZ = max(abs(Normal.z), 1.0e-4);
+	return -Normal.xy / SafeZ;
+}
+
+float3 SlopeToNormal(float2 Slope)
+{
+	float3 Normal = float3(-Slope.x, -Slope.y, 1.0);
+	return normalize(Normal);
+}
+
+float3 BlendGeometryWithHeightTextureDetail(float3 GeometryNormal, float3 CoarseHeightNormal, float3 DetailNormal)
+{
+	float2 GeometrySlope = NormalToSlope(GeometryNormal);
+	float2 CoarseHeightSlope = NormalToSlope(CoarseHeightNormal);
+	float2 DetailSlope = NormalToSlope(DetailNormal);
+	float DetailStrength = max(HeightTextureNormalDetailStrength, 0.0);
+	return SlopeToNormal(GeometrySlope + (DetailSlope - CoarseHeightSlope) * DetailStrength);
+}
+
+float3 ApplyHeightTextureNormalStrength(float3 HeightNormal)
+{
+	float Strength = max(HeightTextureNormalDetailStrength, 0.0);
+	return SlopeToNormal(NormalToSlope(HeightNormal) * Strength);
 }
 
 /**
@@ -259,25 +521,50 @@ void CalculateNormals(uint3 ThreadId : SV_DispatchThreadID)
 		uint x = VertexIndex % ResolutionX;
 		uint y = VertexIndex / ResolutionX;
 		
-		// Primary method: finite difference (fast and accurate for regular grids)
-		float2 UV = InputUVs[VertexIndex];
-		float3 FiniteDiffNormal = CalculateNormalFiniteDifference(UV, PlaneSizeX, PlaneSizeY);
-		
-		// If smoothing is enabled, blend with geometry-based normal
-		if (NormalSmoothingFactor > 0.001)
+		if (NormalCalculationMethod == 6u)
 		{
+			float2 UV = InputUVs[VertexIndex];
+			Normal = ApplyHeightTextureNormalStrength(CalculateHeightTextureDetailNormal(UV));
+		}
+		else if (NormalCalculationMethod == 5u)
+		{
+			float2 UV = InputUVs[VertexIndex];
 			float3 GeomNormal = CalculateNormalFromGrid(x, y);
-			
-			// Lerp between sharp (finite diff) and smooth (geometry-based)
-			// NormalSmoothingFactor = 0: Use finite difference only (sharp detail)
-			// NormalSmoothingFactor = 1: Use geometry-based only (smooth averaged)
-			Normal = lerp(FiniteDiffNormal, GeomNormal, NormalSmoothingFactor);
+			float3 CoarseHeightNormal = CalculateHeightTextureCoarseNormal(UV);
+			float3 DetailNormal = CalculateHeightTextureDetailNormal(UV);
+			Normal = BlendGeometryWithHeightTextureDetail(GeomNormal, CoarseHeightNormal, DetailNormal);
+		}
+		else if (NormalCalculationMethod == 2u || OceanWaveMode == 2u)
+		{
+			Normal = CalculateNormalFromGrid(x, y);
 		}
 		else
 		{
-			// No smoothing - use finite difference only
-			Normal = FiniteDiffNormal;
+			// Primary method: finite difference (fast and accurate for regular grids)
+			float2 UV = InputUVs[VertexIndex];
+			float3 FiniteDiffNormal = CalculateNormalFiniteDifference(UV, PlaneSizeX, PlaneSizeY);
+			
+			// Hybrid mode, plus legacy smoothing behavior, blends with geometry-based normals.
+			if (NormalCalculationMethod == 3u || NormalSmoothingFactor > 0.001)
+			{
+				float3 GeomNormal = CalculateNormalFromGrid(x, y);
+				
+				// Lerp between sharp (finite diff) and smooth (geometry-based)
+				// NormalSmoothingFactor = 0: Use finite difference only (sharp detail)
+				// NormalSmoothingFactor = 1: Use geometry-based only (smooth averaged)
+				Normal = lerp(FiniteDiffNormal, GeomNormal, NormalSmoothingFactor);
+			}
+			else
+			{
+				// No smoothing - use finite difference only
+				Normal = FiniteDiffNormal;
+			}
 		}
+	}
+
+	if (NormalCalculationMethod != 0u && NormalCalculationMethod != 4u)
+	{
+		Normal = ApplyGeneratedNormalIntensity(Normal);
 	}
 	
 	// Invert if requested

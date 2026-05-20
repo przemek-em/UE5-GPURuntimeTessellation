@@ -9,3 +9,6 @@ IMPLEMENT_GLOBAL_SHADER(FGPUVertexGenerationCS, "/Plugin/GPURuntimeTessellation/
 IMPLEMENT_GLOBAL_SHADER(FGPUDisplacementCS, "/Plugin/GPURuntimeTessellation/Private/GPUDisplacement.usf", "ApplyDisplacement", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGPUNormalCalculationCS, "/Plugin/GPURuntimeTessellation/Private/GPUNormalCalculation.usf", "CalculateNormals", SF_Compute);
 IMPLEMENT_GLOBAL_SHADER(FGPUIndexGenerationCS, "/Plugin/GPURuntimeTessellation/Private/GPUIndexGeneration.usf", "GenerateIndices", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGPUMeshTessellationVertexGenerationCS, "/Plugin/GPURuntimeTessellation/Private/GPUMeshTessellation.usf", "GenerateMeshTessellationVerticesCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGPUMeshTessellationIndexGenerationCS, "/Plugin/GPURuntimeTessellation/Private/GPUMeshTessellation.usf", "GenerateMeshTessellationIndicesCS", SF_Compute);
+IMPLEMENT_GLOBAL_SHADER(FGPUMeshTessellationNormalGenerationCS, "/Plugin/GPURuntimeTessellation/Private/GPUMeshTessellation.usf", "GenerateMeshTessellationNormalsCS", SF_Compute);

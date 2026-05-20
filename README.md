@@ -1,514 +1,297 @@
 # GPU Runtime Tessellation (Compute)
 
-[![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.6-blue.svg)](https://www.unrealengine.com/)
-[![Platform](https://img.shields.io/badge/Platform-Win%20%7C%20Linux%20%7C%20Mac%20%7C%20Console-lightgrey.svg)]()
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Experimental](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
+[![Unreal Engine](https://img.shields.io/badge/Unreal%20Engine-5.7-blue.svg)]()
+[![RHI](https://img.shields.io/badge/RHI-DX12%20validated-lightgrey.svg)]()
+[![Status](https://img.shields.io/badge/Status-Experimental-orange.svg)]()
+[![License](https://img.shields.io/badge/License-MIT-green.svg)]()
 
-> **Compute shader-based runtime tessellation without Hull/Domain shaders. Currently optimized for planar surfaces with arbitrary mesh support planned.**
+Compute shader based runtime tessellation for Unreal Engine 5.7.
 
----
+The plugin is actor/component driven: it builds renderable GPU geometry buffers from planar grids, static meshes, scalar height textures, vector displacement textures, and procedural ocean settings. It does not rely on UE material tessellation, hull/domain shaders, or a material custom-output node to create geometry.
 
-## Features
+This README has been refreshed against the current source and `tessellation_changes.diff`.
 
-- **GPU Tessellation** - compute shader-based tessellation (for now CPU only handles LOD decisions)
-- **Dynamic LOD System** - 5 LOD modes including spatial patch-based LOD
-- **Advanced Displacement** - Texture-based, procedural, and RenderTarget support
-- **Multiple Normal Methods** - Finite difference, geometry-based, hybrid, and normal map
-- **Material Support** - Unreal Material system integration
+## Current Status
 
----
+- Experimental plugin, useful for research, prototypes, editor tools, and controlled runtime cases.
+- DX12 is the primary validated RHI. Other desktop RHIs may work but still need real smoke testing.
+- Rendering geometry is generated into GPU buffers and drawn from those GPU buffers. CPU work still exists for LOD decisions, render-state rebuilds, collision cooking, bake/readback paths, and gameplay queries.
+- The material custom-output experiment is not the active workflow. Use the supplied actors/components and assign normal Unreal materials to the generated mesh.
+- Large tessellated surfaces can be fast, but collision and editor baking can become expensive very quickly at high tessellation factors.
 
-## Quick Start
+## Main Features
 
-### Installation
+- **Planar GPU tessellation** through `UGPUTessellationComponent` and `AGPUTessellationActor`.
+- **Arbitrary static mesh tessellation** through `UGPUMeshTessellationComponent` and `AGPUMeshTessellationActor`.
+- **Vector displacement maps** through `UGPUVectorDisplacementComponent` and `AGPUVectorDisplacementActor`.
+- **Procedural ocean displacement** through `UGPUOceanComponent`.
+- **Scalar height displacement** from `UTexture2D` or `UTextureRenderTarget2D`.
+- **Dynamic LOD modes** for planar grids: disabled, smooth distance, discrete distance, spatial patches, density texture WIP, and quadtree patches.
+- **Static mesh LOD modes** for arbitrary mesh tessellation: disabled, distance-based tessellation factor, and distance-based static LOD factors 0-5.
+- **Seven normal methods**: disabled/up vector, finite difference, geometry based, hybrid, normal map, geometry plus height texture detail, and dynamic height texture normals.
+- **Collision options** for planar tessellation: height-field traces, coarse Chaos meshes, vertex-perfect GPU readback meshes, and collision LOD rings.
+- **Patch/quadtree collision support** including current visual LOD matching and full-mesh patch collision baking.
+- **Editor bake tools** for static mesh assets and tangent-space normal map textures.
+- **Water interaction helpers** for sampling, overlap tracking, buoyancy, drag, and debug drawing.
 
-#### Option A: Engine Plugin (Recommended)
-The plugin is located in the engine's plugins folder and available to all projects:
-```
-UnrealEngine/Engine/Plugins/Experimental/GPURuntimeTessellation/
-```
+## GPU Residency
 
-To use it in your project:
-1. Enable the plugin in your project via Editor: **Edit → Plugins → Search "GPU Runtime Tessellation" → Enable**
-2. Restart the editor
-3. The plugin is now available in your project
+2026-05-21: the normal visible render path is GPU-generated and GPU-resident, but the plugin as a whole is not 100% GPU-only.
 
-#### Option B: Project Plugin (Portable)
-For project-specific installation:
-1. Copy the plugin folder to your project's `Plugins` directory:
-   ```
-   YourProject/Plugins/GPURuntimeTessellation/
-   ```
+- Standard planar and vector displacement components generate positions, normals, UVs, and indices in RDG compute passes.
+- Generated RDG buffers are converted to persistent external pooled GPU buffers, then exposed to the custom vertex factory through SRVs and a GPU index buffer.
+- The scene proxy draws `FMeshBatch` instances from those GPU buffers. It does not build a CPU vertex array for normal visible rendering.
+- Patch and quadtree modes use the same GPU buffer path for generated patch geometry. CPU code still chooses patch/quadtree LOD metadata and decides when buffers need rebuilding.
+- Arbitrary static mesh tessellation is hybrid: CPU code reads the source `UStaticMesh` render data, source sections, source vertices, source indices, UVs, tangents, and seam metadata, then uploads that source data to GPU buffers. The expanded/tessellated output mesh is generated and rendered from GPU buffers.
+- Collision, water surface readback, static mesh baking, normal map baking, and vertex-perfect collision are not pure GPU paths. They can read generated GPU data back to CPU arrays and/or feed Chaos/editor asset creation.
+- CPU height-field traces and some collision LOD ring paths intentionally use CPU-side sampled/cached data for gameplay queries.
 
-2. Enable the plugin in your project's `.uproject` file:
-   ```json
-   "Plugins": [
-       {
-           "Name": "GPURuntimeTessellation",
-           "Enabled": true
-       }
-   ]
-   ```
+Short version: visual tessellation rendering stays on the GPU-buffer path; tooling, physics, readback, and source mesh preprocessing still use CPU work where needed.
 
-3. Regenerate project files and compile
+## Actor Workflows
 
-**Note**: Engine plugins (Option A) are not packaged with your project. For distribution, use Option B or ensure target systems have the plugin in their engine installation.
+The easiest workflow is to place one of the actors instead of manually attaching components.
 
+| Actor | Use For | Backing Component |
+| --- | --- | --- |
+| `GPU Tessellation Actor` | Planar heightfields, large terrain planes, quadtree patches, ocean-like surfaces | `UGPUTessellationComponent` |
+| `GPU Mesh Tessellation Actor` | Tessellating an existing `UStaticMesh` such as a cube, rock, prop, or imported mesh | `UGPUMeshTessellationComponent` |
+| `GPU Vector Displacement Actor` | RGB/RGBA vector displacement maps that move vertices in X/Y/Z, not only along height | `UGPUVectorDisplacementComponent` |
 
-## Known build issues
+The actors expose editor-callable buttons for the common actions:
 
-- Build errors when compiling the plugin with the Epic Games Launcher UE 5.6
-  that did not appear when compiling with a locally source-built UE 5.6.
-- Compiler errors referencing `UE::Core::Private::FormatStringSan`, template
-  format validation, or `ArgumentNullException` from UnrealBuildTool when
-  loading module rules.
-- Runtime: shadows not appearing when using Virtual Shadow Maps (they work
-  when switching to standard shadow maps).
+- `Regenerate Tessellated Mesh`
+- `Rebuild Collision Mesh` where the component supports cooked collision
+- `Bake Current Tessellation To Static Mesh`
+- `Validate Vector Displacement Texture` on vector displacement actors
 
-## Root Causes
+## Quick Start: Planar Heightfield
 
-1. Stricter format-string validation and constexpr checks were added in the
-   Epic-built engine toolchain. `UE_LOG` calls containing non-constexpr
-   expressions triggered compile-time template errors when the log format
-   sanitizer attempted to validate arguments.
+1. Enable the `GPURuntimeTessellation` plugin and restart the editor.
+2. Place `GPU Tessellation Actor` in the level.
+3. In `GPU Tessellation`, assign a height texture or render target to `DisplacementTexture`.
+4. Set `TessellationSettings.TessellationFactor`, `PlaneSizeX`, `PlaneSizeY`, `DisplacementIntensity`, and `DisplacementOffset`.
+5. Choose a normal method. `Finite Difference` is fast; `Geometry Based` and `Hybrid` are safer when displacement is strong.
+6. Assign a material to `Material`.
+7. For runtime collision, choose a `CollisionMode` and use conservative resolution/update settings first.
 
-2. Forward declarations for types like `FGPUTessellationSettings` were
-   insufficient in some headers; the launcher build required full includes in
-   order to resolve types at the point of module rule evaluation.
+Height textures are sampled from the R channel. For imported heightmaps, prefer true 16-bit source data, greyscale import, and sRGB off. Render targets are supported for dynamic painting or runtime-generated displacement.
 
-3. Virtual Shadow Maps (VSM) differ from standard shadowmap rendering paths;
-   the plugin's dynamic GPU mesh generation and vertex factory expectations
-   are currently validated against the standard shadowmap rendering path.
+## Quick Start: Arbitrary Static Mesh
 
+1. Place `GPU Mesh Tessellation Actor`.
+2. Assign a source `Static Mesh`.
+3. Set `TessellationFactor`. One source triangle emits roughly `Factor * Factor` output triangles.
+4. Assign `DisplacementTexture`, `DisplacementIntensity`, `DisplacementOffset`, and `UVChannel`.
+5. Keep `Generate Normals` enabled unless you intentionally want interpolated source normals.
+6. Keep `Weld Displacement Normals` and `Generate Seam Stitching` enabled for hard-edge meshes such as cubes.
+7. Use `Distance-Based Static LODs (0-5)` when you want stable preselected tessellation factors instead of continuous updates.
 
-### Basic Usage (C++)
+The arbitrary mesh component inherits from `UStaticMeshComponent`. Rendering uses the generated GPU tessellated mesh, while gameplay collision falls back to the source static mesh collision unless you bake the result to a new static mesh.
+
+## Quick Start: Vector Displacement
+
+1. Place `GPU Vector Displacement Actor`.
+2. Assign an RGB/RGBA texture to `VectorDisplacementTexture`.
+3. Choose `VectorDisplacementSpace`: local, world, or tangent.
+4. Choose the decode mode:
+   - `Signed Float / Direct Units` for float EXR values already authored in Unreal units.
+   - `0..1 Encoded (-1..1)` for normalized packed maps.
+   - `-1..1 Normalized` for signed normalized textures.
+   - `Custom Scale / Bias` when the authoring tool needs exact remapping.
+5. Set `VectorDisplacementScale`, `VectorDisplacementBias`, and `GlobalVectorDisplacementIntensity`.
+6. Increase `VectorDisplacementBoundsPadding` if the mesh disappears or clips at the edges.
+7. Use `Validate Vector Displacement Texture` after import.
+
+Recommended import source for high precision vector displacement is linear OpenEXR. Disable sRGB and use HDR/float-compatible compression such as `TC_HDR`, `TC_HDR_F32`, `TC_HalfFloat`, or `TC_VectorDisplacementmap`. RGBA16F/FloatRGBA is usually enough; RGBA32F can be required with `Require 32 Bit Runtime Texture` when exact 32-bit runtime data is important.
+
+Height-field traces and coarse height-field collision do not understand lateral X/Y vector offsets. For exact vector-displaced collision, use vertex-perfect readback, full patch collision, or bake to a static mesh.
+
+## LOD Modes
+
+Planar tessellation uses `EGPUTessellationLODMode`:
+
+| Mode | Status | Notes |
+| --- | --- | --- |
+| `Disabled` | Stable | Uses `TessellationFactor` directly. |
+| `DistanceBased` | Stable | Smoothly regenerates between min/max tessellation factors. |
+| `DistanceBasedDiscrete` | Stable | Switches through explicit distance buckets and patch levels. |
+| `DistanceBasedPatches` | Experimental | Splits the plane into patch tiles with per-tile LOD. |
+| `DensityTexture` | WIP | Intended for texture-driven density. Treat as unfinished. |
+| `DistanceBasedQuadtree` | Experimental but usable | Builds camera-focused patch leaves with balancing and edge stitching. |
+
+For patch and quadtree modes, use power-of-two patch factors when possible. Mixed LOD is most stable when neighboring factors divide cleanly, for example 128, 64, 32, 16, 8, 4.
+
+`bUsePersistentPatchBuffers` can reduce rebuild work for spatial patch mode, but patch and quadtree systems are still the most experimental part of the plugin.
+
+## Collision
+
+Planar collision is controlled by `EGPUTessellationCollisionMode`:
+
+| Mode | Description |
+| --- | --- |
+| `Disabled` | No plugin-provided collision/query surface. |
+| `HeightFieldTraceOnly` | Component line traces against CPU-evaluable height data. No Chaos mesh. |
+| `CoarseHeightFieldMesh` | Cooks a lower resolution Chaos triangle mesh. |
+| `VertexPerfectMesh` | Reads back generated GPU vertices and cooks a high fidelity Chaos mesh. Expensive. |
+| `CollisionLODRingsMesh` | Builds camera-centered collision rings with dense near samples and coarse far samples. |
+
+Important settings:
+
+- `Match Actual LOD` makes vertex-perfect collision follow the active render LOD. In quadtree/patch modes this can trigger recooks when the camera focus changes, so use the editor recook option carefully.
+- `Bake Full Mesh Patch Collision` creates one full-plane collision mesh for patch/quadtree modes using the highest selected patch density. This is often better for gameplay stability than camera-dependent collision.
+- `Full Mesh Patch Collision Cap` clamps the computed full-plane factor. Example: a 4x4 patch layout with patch factor 32 requests an effective full mesh factor of 128.
+- `Use Async Collision Cooking` avoids blocking on Chaos cooking when possible, but GPU readback and first-cook requirements can still hitch.
+- `Use Synchronous Initial Collision Cook` prevents a startup no-collision window at the cost of an initial stall for large meshes.
+
+At very high factors, collision cost grows much faster than visual rendering cost. Prefer coarse collision, LOD rings, baked meshes, or full-patch collision where possible.
+
+## Baking
+
+Editor bake support is available from the component and actor buttons.
+
+Bake settings shared by the standard planar, vector displacement, and arbitrary mesh components:
+
+- `BakeAssetDirectory`
+- `BakeAssetName`
+- `bBakeMeshAllowCPUAccess`
+- `bBakeMeshUseComplexCollision`
+- `bBakeMeshAutoSaveAsset`
+
+Additional planar/vector bake settings:
+
+- `bBakeMeshUseCurrentVisualLOD`
+- `bBakeMeshFullPatchMesh`
+- `BakeFullPatchMeshTessellationCap`
+
+Normal map bake settings:
+
+- `bBakeNormalMapTexture`
+- `bBakeNormalMapOnly`
+- `BakeNormalMapAssetName`
+- `BakeNormalMapTexelStep`
+- `BakeNormalMapStrength`
+
+Normal map baking generates a tangent-space normal texture from the scalar height texture or render target using central differences. On the standard planar component it also respects `SubtractTexture`. `bBakeNormalMapOnly` skips static mesh creation and writes only the normal texture.
+
+Vector displacement static mesh bakes include the vector-displaced geometry because the vector component reuses the standard bake path. The normal-map bake path is height-texture based; it is not a full vector-displacement normal baker.
+
+## Procedural Ocean
+
+`UGPUOceanComponent` derives from the standard tessellation component and fills procedural ocean settings for rendering and sampling.
+
+Supported wave modes:
+
+- `Gerstner`
+- `FFT / Tessendorf`
+- `Perlin fBm`
+
+The ocean path is still research-grade. It is useful for testing generated displacement, normals, water interaction, and buoyancy, but animated ocean surfaces can still force frequent proxy/render-state updates until a dynamic redispatch path exists.
+
+## Material Usage
+
+The generated meshes render with regular Unreal surface materials through the plugin vertex factory.
+
+Use materials for shading, texture sampling, and visual effects. Do not expect a material output node to spawn tessellated geometry on any arbitrary mesh. The active geometry generation path is owned by the actor/component, not by the material graph.
+
+For tangent-space normal maps on generated geometry, make sure the material setup matches the normal source. If normals look wrong, try geometry-based normals, disable tangent-space normal interpretation in the material for world/local normal data, or use the height-texture normal methods.
+
+## Renderer Feature Compatibility
+
+2026-05-21:
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Motion vectors / velocity | Not reliable yet | Scene proxies set velocity relevance, but dynamic primitive uniform buffers currently use the current transform as `PreviousLocalToWorld` and pass `bOutputVelocity = false`. The plugin also does not keep previous GPU-displaced vertex buffers, so animated displacement, quadtree changes, and ocean motion should not be treated as having correct motion vectors. |
+| Generated mesh distance fields | Not implemented | Components/proxies set `bAffectDistanceFieldLighting = true`, but the plugin does not build or update mesh distance-field volume data for generated/tessellated vertices. Runtime generated geometry should not be expected to contribute correct distance-field shadows, DFAO, or software distance-field traces. |
+| Static lighting UVs | Not implemented for runtime meshes | Runtime meshes are dynamic. Baked static meshes currently use lightmap coordinate index 0 and set `bGenerateLightmapUVs = false`, so author or generate proper lightmap UVs after bake if static lighting is needed. |
+| PSO precaching | Not implemented explicitly | The vertex factory registers default/depth declarations for draw compatibility, but there is no plugin PSO precache collection path. Expect normal shader/PSO warmup behavior rather than guaranteed precached PSOs. |
+| Ambient occlusion | Partially expected, not fully verified | Screen-space/depth based AO can see the generated mesh through normal rendering/depth passes. Distance-field AO and static/baked AO should be considered unsupported for runtime generated geometry until generated distance fields and static lighting data exist. |
+
+## Tessellation Dispatch Changes
+
+The current branch contains important low-level changes that affect the whole tessellation pipeline:
+
+- Vertex generation and index generation were changed from 2D dispatches to linear 1D dispatches.
+- `GPUVertexGeneration.usf` now runs one thread per vertex slot with a single linear bounds check.
+- `GPUIndexGeneration.usf` now runs one thread per quad with a single linear bounds check.
+- This fixes the old corner-thread failure where the last X/Y thread could skip UAV writes, leaving a vertex or index slots at zero and producing collapsed or bugged corner triangles.
+- Vertex, normal, UV, tangent, and index output buffers are pre-cleared before compute passes. This makes any missed write fail as safe cleared data instead of random transient RDG memory.
+- The displacement pass no longer binds the position buffer as both SRV and UAV. It reads the current position from `OutputPositions[VertexIndex]` and writes back to the same slot, avoiding same-resource SRV/UAV aliasing inside one RDG pass.
+- Index generation uses a typed `RWBuffer<uint>` so the output can be used cleanly as an index buffer downstream.
+- Generated RDG buffers are converted to external pooled buffers and the pooled wrappers are kept alive. This prevents the RDG transient pool from reusing the same underlying RHI memory while the scene proxy still has SRVs pointing at it.
+- Patch and quadtree generation reuse the same safer dispatch path, including edge-collapse factors for LOD stitching.
+- Arbitrary mesh tessellation adds its own compute pipeline with vertex, index, normal, tangent, UV, and seam-stitching buffers, also using 1D dispatch sized by output vertex/primitive counts.
+- Normal generation is dispatched only when the selected normal mode needs generated normals. Height-texture normal paths are kept consistent with the displacement source.
+- Ocean FFT displacement is produced as an RDG texture pre-pass and sampled by displacement/normal passes through the same pipeline.
+
+These changes are the reason the standard cube/corner corruption issue was fixed and why generated buffers remain stable across later renderer passes such as VSM, Lumen, and post-process RDG work.
+
+## C++ Example
 
 ```cpp
+#include "GPUTessellationActor.h"
 #include "GPUTessellationComponent.h"
 
-// Create component
-UGPUTessellationComponent* TessComp = CreateDefaultSubobject<UGPUTessellationComponent>(TEXT("Tessellation"));
+AGPUTessellationActor* Actor = World->SpawnActor<AGPUTessellationActor>();
+UGPUTessellationComponent* Tess = Actor->GetTessellationComponent();
 
-// Configure settings
-TessComp->TessellationSettings.TessellationFactor = 16;
-TessComp->TessellationSettings.PlaneSizeX = 1000.0f;
-TessComp->TessellationSettings.PlaneSizeY = 1000.0f;
-TessComp->TessellationSettings.DisplacementIntensity = 100.0f;
-
-// Set displacement texture
-TessComp->SetDisplacementTexture(MyHeightMap);
-
-// Set material
-TessComp->SetMaterial(0, MyMaterial);
+Tess->TessellationSettings.TessellationFactor = 128;
+Tess->TessellationSettings.PlaneSizeX = 10000.0f;
+Tess->TessellationSettings.PlaneSizeY = 10000.0f;
+Tess->TessellationSettings.DisplacementIntensity = 500.0f;
+Tess->TessellationSettings.NormalCalculationMethod = EGPUTessellationNormalMethod::FiniteDifference;
+Tess->SetDisplacementTexture(HeightTexture);
+Tess->SetMaterial(0, TerrainMaterial);
+Tess->UpdateTessellatedMesh();
 ```
 
-### Basic Usage (Blueprint)
+## Requirements
 
-1. Add `GPUTessellationComponent` to your actor
-2. Configure properties in the Details panel:
-   - Set `Tessellation Factor`
-   - Assign `Displacement Texture`
-   - Choose `Normal Calculation Method`
-   - Assign `Material`
-3. Enable `Auto Update` for dynamic LOD
-
----
-
-## Why?
-
-**Unreal Engine 5 removed support for Hull/Domain shader tessellation** in favor of Nanite virtualized geometry. However, Nanite doesn't fully and perfectly support runtime displacement or procedural deformation. This plugin **restores tessellation capability** using a modern compute shader approach that works universally.
-
-Traditional tessellation uses Hull and Domain shaders, which require specific hardware support and aren't available on all platforms. This plugin uses **compute shaders** instead:
-
-### Traditional Tessellation (Removed in UE5)
-```
-❌ Requires hardware tessellation units
-❌ Platform-limited (DirectX 11+ specific)
-❌ Fixed pipeline, hard to customize
-❌ Difficult to debug
-```
-
-### Compute Tessellation
-```
-✅ Works on ANY platform with compute shader support
-✅ Complete control over tessellation logic
-✅ Easy to debug and profile
-✅ Future-proof architecture
-✅ Minimal CPU overhead (only LOD decisions, ~0.05-0.2ms)
-```
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────┐
-│   UGPUTessellationComponent         │  ← Blueprint/C++ API
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│   FGPUTessellationSceneProxy        │  ← Rendering Thread
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│    GPU COMPUTE PIPELINE             │  ← 5 Compute Shaders
-│                                     │
-│   1. Vertex Generation              │
-│   2. Displacement Mapping           │
-│   3. Normal Calculation             │
-│   4. Tangent Calculation            │
-│   5. Index Generation               │
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│   GPU Buffers (Stay on GPU!)        │  ← No CPU Readback
-└──────────────┬──────────────────────┘
-               │
-               ▼
-┌─────────────────────────────────────┐
-│   Material Rendering                │  ← Standard Unreal
-└─────────────────────────────────────┘
-```
-
----
-
-## LOD System
-
-### Distance-Based Smooth LOD
-Smooth tessellation transitions based on camera distance.
-
-```cpp
-Settings.LODMode = EGPUTessellationLODMode::DistanceBased;
-Settings.MaxTessellationFactor = 64;  // Close range
-Settings.MinTessellationFactor = 8;   // Far range
-Settings.MaxTessellationDistance = 10000.0f;
-```
-
-### Distance-Based Discrete LOD
-Discrete tessellation levels for better performance.
-
-```cpp
-Settings.LODMode = EGPUTessellationLODMode::DistanceBasedDiscrete;
-Settings.DiscreteLODLevels = {
-    EGPUTessellationPatchLevel::Patch_64,  // Closest
-    EGPUTessellationPatchLevel::Patch_32,
-    EGPUTessellationPatchLevel::Patch_16,
-    EGPUTessellationPatchLevel::Patch_8    // Farthest
-};
-Settings.DiscreteLODDistances = { 2000.0f, 5000.0f, 10000.0f, 20000.0f };
-```
-
-### Spatial Patch LOD
-Divide terrain into patches with per-patch LOD - **Best for large terrains!**
-
-```cpp
-Settings.LODMode = EGPUTessellationLODMode::DistanceBasedPatches;
-Settings.PatchCountX = 4;  // 4×4 = 16 patches
-Settings.PatchCountY = 4;
-Settings.bEnablePatchCulling = true;  // Frustum culling per patch
-```
-
-**Performance gain**: 60-80% for large open-world terrains!
-
----
-
-## Examples
-
-### Terrain with Displacement
-
-```cpp
-UCLASS()
-class AMyTerrain : public AActor
-{
-    GENERATED_BODY()
-
-public:
-    AMyTerrain()
-    {
-        TessComp = CreateDefaultSubobject<UGPUTessellationComponent>(TEXT("Terrain"));
-        RootComponent = TessComp;
-
-        // Terrain settings
-        TessComp->TessellationSettings.TessellationFactor = 32;
-        TessComp->TessellationSettings.PlaneSizeX = 10000.0f;  // 100m × 100m
-        TessComp->TessellationSettings.PlaneSizeY = 10000.0f;
-        TessComp->TessellationSettings.DisplacementIntensity = 500.0f;
-        TessComp->TessellationSettings.bUseSineWaveDisplacement = false;
-        
-        // Enable LOD
-        TessComp->TessellationSettings.LODMode = EGPUTessellationLODMode::DistanceBased;
-        TessComp->TessellationSettings.MaxTessellationFactor = 64;
-        TessComp->TessellationSettings.MinTessellationFactor = 8;
-        
-        // Normal calculation
-        TessComp->TessellationSettings.NormalCalculationMethod = 
-            EGPUTessellationNormalMethod::FiniteDifference;
-    }
-
-    UPROPERTY(VisibleAnywhere)
-    UGPUTessellationComponent* TessComp;
-};
-```
-
-### Water Surface
-
-```cpp
-UCLASS()
-class AWaterSurface : public AActor
-{
-    GENERATED_BODY()
-
-public:
-    AWaterSurface()
-    {
-        TessComp = CreateDefaultSubobject<UGPUTessellationComponent>(TEXT("Water"));
-        
-        // Water settings
-        TessComp->TessellationSettings.TessellationFactor = 32;
-        TessComp->TessellationSettings.PlaneSizeX = 5000.0f;
-        TessComp->TessellationSettings.PlaneSizeY = 5000.0f;
-        TessComp->TessellationSettings.DisplacementIntensity = 50.0f;
-        TessComp->TessellationSettings.bUseSineWaveDisplacement = true;
-        
-        // Smooth normals
-        TessComp->TessellationSettings.NormalCalculationMethod = 
-            EGPUTessellationNormalMethod::Hybrid;
-        TessComp->TessellationSettings.NormalSmoothingFactor = 0.7f;
-        
-        TessComp->bAutoUpdate = true;
-    }
-
-    UPROPERTY(VisibleAnywhere)
-    UGPUTessellationComponent* TessComp;
-};
-```
-
-### Runtime Painting (Snow/Footprints)
-
-```cpp
-void ASnowTerrain::SetupRuntimePainting()
-{
-    // Create RenderTarget for painting
-    UTextureRenderTarget2D* PaintRT = NewObject<UTextureRenderTarget2D>();
-    PaintRT->RenderTargetFormat = RTF_RGBA8;
-    PaintRT->InitAutoFormat(512, 512);
-    PaintRT->UpdateResourceImmediate(true);
-    
-    // Set as subtract texture (white = no displacement, black = full displacement)
-    TessComp->SetSubtractTexture(PaintRT);
-}
-
-void ASnowTerrain::PaintFootprint(FVector WorldLocation)
-{
-    // Convert world location to UV
-    FVector LocalPos = GetActorTransform().InverseTransformPosition(WorldLocation);
-    float U = (LocalPos.X / TessComp->TessellationSettings.PlaneSizeX) + 0.5f;
-    float V = (LocalPos.Y / TessComp->TessellationSettings.PlaneSizeY) + 0.5f;
-    
-    // Draw white circle to RenderTarget (creates footprint effect!)
-    DrawCircleToRenderTarget(PaintRT, U, V, 0.05f, FLinearColor::White);
-}
-```
-
----
-
-## Performance
-
-
-1. **Use Patch Mode** for large terrains (60-80% performance gain)
-2. **Enable LOD System** with appropriate distance thresholds
-3. **Use FiniteDifference** normals for speed (default)
-4. **Frustum Culling** is still experimental (needs to be implemented correctly in future)
-5. **Pre-bake Normal Maps** is still experimental (needs to be implemented correctly so use in-material normalmap instead - did this feature mostly for test purposes with patch based system)
-
----
-
-
-## API Reference
-
-### Component Functions
-
-```cpp
-// Update mesh manually
-void UpdateTessellatedMesh();
-
-// Set textures
-void SetDisplacementTexture(UTexture2D* InTexture);
-void SetSubtractTexture(UTexture2D* InTexture);  // Supports RenderTargets!
-void SetNormalMapTexture(UTexture2D* InTexture);
-
-// Update settings
-void UpdateSettings(const FGPUTessellationSettings& NewSettings);
-
-// Query information
-FIntPoint GetTessellationResolution() const;
-int32 GetVertexCount() const;
-int32 GetTriangleCount() const;
-```
-
-### Blueprint Nodes
-
-All C++ functions are exposed to Blueprint with the `BlueprintCallable` or `BlueprintPure` specifiers.
-
----
-
-### Minimum Requirements
-- **Feature Level**: SM5 (Shader Model 5.0)
-- **Compute Shader Support**: Required
-- **GPU**: Any modern GPU with compute shader support
-
----
+- Unreal Engine 5.7 source build.
+- Compute shader capable RHI.
+- DX12 recommended for current testing.
+- Editor-only bake features require editor modules such as `UnrealEd`, `AssetRegistry`, `MeshDescription`, and `StaticMeshDescription`.
 
 ## Troubleshooting
 
-### Mesh Not Appearing
-- Verify displacement intensity isn't extreme
-- Check component bounds (might be culled)
+### Mesh does not appear
 
-### Normals Look Wrong
-- Uncheck in material Tangent Space Normal
-- Try different normal calculation methods
-- Check displacement texture range (should be 0-1)
-- Verify normal map format (BC5 recommended)
-- Toggle `bInvertNormals` if upside-down
+- Check that the plugin is enabled and shaders compiled.
+- Assign a material or verify the default material renders.
+- Lower tessellation factor or safety caps if the component logs allocation warnings.
+- Increase vector displacement bounds padding if using vector displacement.
 
-### Poor Performance
-- Enable LOD system (DistanceBased or Patches)
-- Reduce tessellation factor
-- Use patch mode for large terrains
+### Cube or hard-edge mesh has cracks
 
-### Debug Mode
-Enable debug logging for troubleshooting:
-```cpp
-TessComp->bEnableDebugLogging = true;
-TessComp->bShowPatchDebugVisualization = true;  // Editor only
-```
+- Use `GPU Mesh Tessellation Actor`.
+- Keep `Weld Displacement Normals` enabled.
+- Keep `Generate Seam Stitching` enabled.
+- Confirm the selected `UVChannel` is valid for the source mesh.
 
----
+### Normals look wrong
 
-## Technical Details
+- Try `Geometry Based` or `Hybrid`.
+- For dynamic height textures, try `From Height Texture / Render Target`.
+- Adjust `Height Texture Normal Texel Step`, `Height Texture Normal Strength`, and `Vertex Normal Intensity`.
+- Confirm the material expects the same normal space being provided.
 
-### Compute Shader Pipeline
+### Collision lags or appears late
 
-1. **Vertex Generation** (`GPUVertexGeneration.usf`)
-   - Generates grid vertices on GPU
-   - Calculates UVs and base normals
-   - Thread group: 8×8×1
+- Lower collision resolution or vertex-perfect tessellation.
+- Use `Bake Full Mesh Patch Collision` for patch/quadtree gameplay surfaces.
+- Keep automatic matched-LOD recooking disabled in editor for heavy quadtree scenes.
+- Consider baking a static mesh for collision-heavy gameplay.
 
-2. **Displacement** (`GPUDisplacement.usf`)
-   - Samples displacement texture on GPU
-   - Applies height displacement
-   - Supports RenderTarget masking
-   - Thread group: 64×1×1
+### Performance is poor
 
-3. **Normal Calculation** (`GPUNormalCalculation.usf`)
-   - Calculates normals using chosen method
-   - Supports finite difference, geometry-based, hybrid, and normal map
-   - Thread group: 64×1×1
-NOTE: The vertex factory uses a simplified tangent basis (axis-aligned) for performance. Normal maps expect tangents that follow UV gradients on the displaced surface. This mismatch causes distortion. Use geometric normals instead (uncheck "Tangent Space Normal" in material).
+- Prefer power-of-two LOD factors.
+- Avoid forcing vertex-perfect collision to update every camera movement.
+- Use distance-based static LODs for arbitrary mesh actors when continuous regeneration is unnecessary.
+- Use normal-map baking or material normal maps when geometry density is already high enough.
+- Keep debug draw and verbose logging disabled outside diagnosis.
 
-4. **Tangent Calculation** (`GPUTangentCalculation.usf`)
-   - Generates tangent space for normal mapping
-   - Thread group: 64×1×1
 
-5. **Index Generation** (`GPUIndexGeneration.usf`)
-   - Generates triangle indices
-   - Thread group: 8×8×1
-
-### GPU Buffers (Zero CPU Readback)
-```cpp
-struct FGPUTessellationBuffers
-{
-    FBufferRHIRef PositionBuffer;   // Stays on GPU
-    FBufferRHIRef NormalBuffer;     // Stays on GPU
-    FBufferRHIRef UVBuffer;         // Stays on GPU
-    FBufferRHIRef TangentBuffer;    // Stays on GPU
-    FBufferRHIRef IndexBufferRHI;   // Stays on GPU
-};
-```
-
-All buffers are created by compute shaders and **never leave GPU memory** - ensuring maximum performance!
-
----
-
-## Limitations
-
-- **Planar Meshes Only**: Currently designed for flat planes (terrain, water, floors)
-- **Not for Arbitrary 3D Meshes**: Not suitable for characters or complex 3D models
-- **Dynamic Updates**: Settings changes trigger GPU recompute (fast, but not every frame)
-
----
-
-## Roadmap
-
-- [ ] Collision system
-- [ ] Virtual Shadow Maps integration
-- [x] Seamless improvement for patch system
-- [ ] Complete Density Texture LOD implementation
-- [ ] Support for arbitrary base meshes
-- [ ] GPU-driven autonomous LOD (move LOD calculations to GPU)
-- [ ] Automatic water/ocean simulation
-- [ ] Optional Subdivision
-- [ ] Optional CDLOD mode with morphing
-
----
-
-## Contributing
-
-This is an experimental plugin. Contributions, issues, and feature requests are welcome!
-
----
-
-## License
-
-This project is licensed under the MIT License.
-
-Some parts of the code were generated with assistance from AI tools (e.g., Github Copilot - Anthropic Claude 4.5 / OpenAI GPT-5).
-Note: This plugin is still highly experimental and definitely not production ready.
-
----
-
-## Use Cases
-
-### Perfect For
-- Terrain systems
-- Water surfaces
-- Procedural ground planes
-- Displacement-mapped floors
-- Large open-world environments
-- Cross-platform projects
-- Real-time dynamic displacement (snow, footprints)
-
-### Not Yet Ideal For
-- Character meshes
-- Complex 3D models
-- Per-frame animated displacement (heavy)
-- Mobile low-end devices
-
----
-
-## Key Advantages
-
-| Feature | Traditional Tessellation | Compute Tessellation |
-|---------|-------------------------|---------------------------|
-| **Platform Support** | DirectX 11+ specific | Universal (SM5+) |
-| **Hardware Required** | Tessellation units | Compute shaders only |
-| **Debugging** | Opaque, hard to debug | Full shader debugging |
-| **Flexibility** | Fixed pipeline | Complete control |
-| **LOD Control** | Limited | Advanced custom systems |
-| **Future-Proof** | Legacy feature | Core modern API feature |
-
----
-
-## Acknowledgments
-
-Built for Unreal Engine 5.6.1 as an experimental plugin demonstrating  compute shader-based tessellation as a replacement for traditional Hull/Domain shader pipelines.
-
----
 ### Screenshots
 ![Image](images/patch_system_gif2.gif)
 ![Image](images/patch_system_gif.gif)
@@ -518,5 +301,7 @@ Built for Unreal Engine 5.6.1 as an experimental plugin demonstrating  compute s
 ![Image](images/image4.png)
 ![Image](images/image5.png)
 
----
-**Made for the Unreal Engine community**
+
+## License
+
+Licensed under the MIT License. See the project license file for details.

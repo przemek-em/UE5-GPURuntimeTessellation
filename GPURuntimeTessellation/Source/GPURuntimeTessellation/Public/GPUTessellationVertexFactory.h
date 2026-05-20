@@ -22,7 +22,19 @@ public:
 	/**
 	 * Set GPU buffer SRVs
 	 */
-	void SetBuffers(FShaderResourceViewRHIRef InPositionSRV, FShaderResourceViewRHIRef InNormalSRV, FShaderResourceViewRHIRef InUVSRV);
+	void SetBuffers(FShaderResourceViewRHIRef InPositionSRV, FShaderResourceViewRHIRef InNormalSRV, FShaderResourceViewRHIRef InUVSRV, FShaderResourceViewRHIRef InTangentSRV = FShaderResourceViewRHIRef());
+
+	/** Set optional height texture parameters used to override pixel normals from the source height field. */
+	void SetHeightNormalParameters(
+		bool bInUseHeightTexturePixelNormals,
+		FTextureRHIRef InHeightNormalTextureRHI,
+		FTextureRHIRef InHeightNormalSubtractTextureRHI,
+		bool bInHasHeightNormalSubtractTexture,
+		float InHeightNormalDisplacementIntensity,
+		float InHeightNormalStrength,
+		float InHeightNormalTexelStep,
+		float InHeightNormalPlaneSizeX,
+		float InHeightNormalPlaneSizeY);
 
 	/**
 	 * Init RHI resources
@@ -53,4 +65,26 @@ public:
 	FShaderResourceViewRHIRef PositionSRV;
 	FShaderResourceViewRHIRef NormalSRV;
 	FShaderResourceViewRHIRef UVSRV;
+	FShaderResourceViewRHIRef TangentSRV;
+
+	FTextureRHIRef HeightNormalTextureRHI;
+	FTextureRHIRef HeightNormalSubtractTextureRHI;
+	bool bUseHeightTexturePixelNormals = false;
+	bool bHasHeightNormalSubtractTexture = false;
+	float HeightNormalDisplacementIntensity = 1.0f;
+	float HeightNormalStrength = 1.0f;
+	float HeightNormalTexelStep = 1.0f;
+	float HeightNormalPlaneSizeX = 1000.0f;
+	float HeightNormalPlaneSizeY = 1000.0f;
+};
+
+/** GPUScene-capable variant used only by shadow-depth views that require instance culling. */
+class FGPUTessellationGPUSceneVertexFactory : public FGPUTessellationVertexFactory
+{
+	DECLARE_VERTEX_FACTORY_TYPE(FGPUTessellationGPUSceneVertexFactory);
+
+public:
+	FGPUTessellationGPUSceneVertexFactory(ERHIFeatureLevel::Type InFeatureLevel);
+
+	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };

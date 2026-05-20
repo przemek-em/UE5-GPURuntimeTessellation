@@ -18,9 +18,11 @@
 
 // ============================================================================
 // EXAMPLE 1: Simple Tessellated Plane Actor
+// (NotPlaceable + HideDropdown so it does not clutter the Place Actors panel.
+// Use UGPUTessellationComponent directly on your own actors instead.)
 // ============================================================================
 
-UCLASS(Blueprintable)
+UCLASS(NotPlaceable, HideDropdown, NotBlueprintable)
 class GPURUNTIMETESSELLATION_API AGPUTessellatedPlaneActor : public AActor
 {
 	GENERATED_BODY()
@@ -47,9 +49,10 @@ public:
 
 // ============================================================================
 // EXAMPLE 2: Terrain Actor with Displacement Texture
+// (NotPlaceable: references SoftObjectPaths that do not ship with the plugin.)
 // ============================================================================
 
-UCLASS(Blueprintable)
+UCLASS(NotPlaceable, HideDropdown, NotBlueprintable)
 class GPURUNTIMETESSELLATION_API AGPUTessellatedTerrain : public AActor
 {
 	GENERATED_BODY()
@@ -115,9 +118,11 @@ public:
 
 // ============================================================================
 // EXAMPLE 3: Dynamic Water Surface
+// (NotPlaceable: superseded by the upcoming GPU ocean component which provides
+// FFT/Gerstner waves natively. Kept as a minimal procedural-sine reference.)
 // ============================================================================
 
-UCLASS(Blueprintable)
+UCLASS(NotPlaceable, HideDropdown, NotBlueprintable)
 class GPURUNTIMETESSELLATION_API AGPUWaterSurface : public AActor
 {
 	GENERATED_BODY()
@@ -165,9 +170,11 @@ public:
 
 // ============================================================================
 // EXAMPLE 4: Runtime Configuration Actor
+// (NotPlaceable: this is a function holder, not a scene actor. The Blueprint-
+// callable helpers below remain reachable through the class type.)
 // ============================================================================
 
-UCLASS(Blueprintable, BlueprintType)
+UCLASS(NotPlaceable, HideDropdown, NotBlueprintable)
 class GPURUNTIMETESSELLATION_API AGPUTessellationController : public AActor
 {
 	GENERATED_BODY()

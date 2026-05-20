@@ -1,0 +1,386 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+
+#include "/Engine/Private/Common.ush"
+
+struct FGPUMeshTessellationVertex
+{
+	float3 Position;
+	float3 Normal;
+	float3 DisplacementNormal;
+	float3 Tangent;
+	float TangentSign;
+	float2 UV;
+};
+
+uint SourceTriangleCount;
+uint TessellationFactor;
+uint VerticesPerTriangle;
+uint IndicesPerTriangle;
+uint OutputVertexCount;
+uint OutputIndexCount;
+uint SeamEdgeCount;
+uint bEnableDisplacement;
+uint bHasDisplacementTexture;
+float DisplacementIntensity;
+float DisplacementOffset;
+
+StructuredBuffer<FGPUMeshTessellationVertex> InputVertices;
+StructuredBuffer<uint> InputIndices;
+StructuredBuffer<uint4> InputSeamEdges;
+StructuredBuffer<float3> InputGeneratedPositions;
+StructuredBuffer<float3> InputBaseNormals;
+Texture2D<float> DisplacementTexture;
+SamplerState DisplacementSampler;
+
+RWStructuredBuffer<float3> OutputPositions;
+RWStructuredBuffer<float3> OutputNormals;
+RWStructuredBuffer<float2> OutputUVs;
+RWStructuredBuffer<float4> OutputTangents;
+RWBuffer<uint> OutputIndices;
+
+float3 GPUMeshSafeNormalize(float3 Value, float3 Fallback)
+{
+	float LengthSquared = dot(Value, Value);
+	return LengthSquared > 1.0e-12 ? Value * rsqrt(LengthSquared) : Fallback;
+}
+
+uint GPUMeshTessellationRowStart(uint Row, uint Factor)
+{
+	return Row * (Factor + 1u) - (Row * (Row - 1u)) / 2u;
+}
+
+uint GPUMeshTessellationVertexIndex(uint Row, uint Col, uint Factor)
+{
+	return GPUMeshTessellationRowStart(Row, Factor) + Col;
+}
+
+void GPUMeshTessellationDecodeVertex(uint LocalVertexIndex, uint Factor, out uint Row, out uint Col)
+{
+	Row = 0u;
+	uint RowCount = Factor + 1u;
+	uint Remaining = LocalVertexIndex;
+
+	[loop]
+	while (Remaining >= RowCount && Row < Factor)
+	{
+		Remaining -= RowCount;
+		Row++;
+		RowCount--;
+	}
+
+	Col = Remaining;
+}
+
+float GPUMeshSampleHeight(float2 UV)
+{
+	if (bHasDisplacementTexture == 0u)
+	{
+		return 0.0;
+	}
+
+	uint Width;
+	uint Height;
+	DisplacementTexture.GetDimensions(Width, Height);
+	if (Width == 0u || Height == 0u)
+	{
+		return 0.0;
+	}
+
+	float2 TexelCoord = saturate(UV) * float2((float)Width, (float)Height) - 0.5;
+	float2 BaseFloat = floor(TexelCoord);
+	int2 Base = int2(BaseFloat);
+	float2 Blend = TexelCoord - BaseFloat;
+	int2 MaxCoord = int2((int)Width - 1, (int)Height - 1);
+
+	int2 Coord00 = min(max(Base, int2(0, 0)), MaxCoord);
+	int2 Coord10 = min(max(Base + int2(1, 0), int2(0, 0)), MaxCoord);
+	int2 Coord01 = min(max(Base + int2(0, 1), int2(0, 0)), MaxCoord);
+	int2 Coord11 = min(max(Base + int2(1, 1), int2(0, 0)), MaxCoord);
+
+	float H00 = DisplacementTexture.Load(int3(Coord00, 0));
+	float H10 = DisplacementTexture.Load(int3(Coord10, 0));
+	float H01 = DisplacementTexture.Load(int3(Coord01, 0));
+	float H11 = DisplacementTexture.Load(int3(Coord11, 0));
+
+	float H0 = lerp(H00, H10, Blend.x);
+	float H1 = lerp(H01, H11, Blend.x);
+	return lerp(H0, H1, Blend.y);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void GenerateMeshTessellationVerticesCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint VertexIndex = ThreadId.x;
+	if (VertexIndex >= OutputVertexCount || TessellationFactor == 0u || VerticesPerTriangle == 0u)
+	{
+		return;
+	}
+
+	uint SourceTriangleIndex = VertexIndex / VerticesPerTriangle;
+	uint LocalVertexIndex = VertexIndex - SourceTriangleIndex * VerticesPerTriangle;
+	if (SourceTriangleIndex >= SourceTriangleCount)
+	{
+		return;
+	}
+
+	uint Row;
+	uint Col;
+	GPUMeshTessellationDecodeVertex(LocalVertexIndex, TessellationFactor, Row, Col);
+
+	float B1 = (float)Row / (float)TessellationFactor;
+	float B2 = (float)Col / (float)TessellationFactor;
+	float B0 = 1.0 - B1 - B2;
+
+	uint I0 = InputIndices[SourceTriangleIndex * 3u + 0u];
+	uint I1 = InputIndices[SourceTriangleIndex * 3u + 1u];
+	uint I2 = InputIndices[SourceTriangleIndex * 3u + 2u];
+
+	FGPUMeshTessellationVertex V0 = InputVertices[I0];
+	FGPUMeshTessellationVertex V1 = InputVertices[I1];
+	FGPUMeshTessellationVertex V2 = InputVertices[I2];
+
+	float3 Position = V0.Position * B0 + V1.Position * B1 + V2.Position * B2;
+	float3 Normal = GPUMeshSafeNormalize(V0.Normal * B0 + V1.Normal * B1 + V2.Normal * B2, float3(0.0, 0.0, 1.0));
+	float3 DisplacementNormal = GPUMeshSafeNormalize(V0.DisplacementNormal * B0 + V1.DisplacementNormal * B1 + V2.DisplacementNormal * B2, Normal);
+	float3 TangentData = V0.Tangent * B0 + V1.Tangent * B1 + V2.Tangent * B2;
+	float3 Tangent = GPUMeshSafeNormalize(TangentData, float3(1.0, 0.0, 0.0));
+	float TangentSignData = V0.TangentSign * B0 + V1.TangentSign * B1 + V2.TangentSign * B2;
+	float TangentSign = (TangentSignData < 0.0) ? -1.0 : 1.0;
+	float2 UV = V0.UV * B0 + V1.UV * B1 + V2.UV * B2;
+
+	if (bEnableDisplacement != 0u)
+	{
+		float Height = GPUMeshSampleHeight(UV);
+		Position += DisplacementNormal * (Height * DisplacementIntensity + DisplacementOffset);
+	}
+
+	OutputPositions[VertexIndex] = Position;
+	OutputNormals[VertexIndex] = Normal;
+	OutputUVs[VertexIndex] = UV;
+	OutputTangents[VertexIndex] = float4(Tangent, TangentSign);
+}
+
+uint2 GPUMeshTessellationEdgeLocalCoord(uint EdgeIndex, uint Step, uint Factor)
+{
+	if (EdgeIndex == 0u)
+	{
+		return uint2(Step, 0u);
+	}
+	if (EdgeIndex == 1u)
+	{
+		return uint2(Factor - Step, Step);
+	}
+	return uint2(0u, Factor - Step);
+}
+
+uint GPUMeshTessellationEdgeLocalVertexIndex(uint EdgeIndex, uint Step, uint Factor)
+{
+	uint2 Coord = GPUMeshTessellationEdgeLocalCoord(EdgeIndex, Step, Factor);
+	return GPUMeshTessellationVertexIndex(Coord.x, Coord.y, Factor);
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void GenerateMeshTessellationIndicesCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint PrimitiveIndex = ThreadId.x;
+	uint OutputPrimitiveCount = OutputIndexCount / 3u;
+	if (PrimitiveIndex >= OutputPrimitiveCount || TessellationFactor == 0u || VerticesPerTriangle == 0u || IndicesPerTriangle == 0u)
+	{
+		return;
+	}
+
+	uint PrimitivesPerSourceTriangle = TessellationFactor * TessellationFactor;
+	uint BasePrimitiveCount = SourceTriangleCount * PrimitivesPerSourceTriangle;
+
+	if (PrimitiveIndex >= BasePrimitiveCount)
+	{
+		uint SeamPrimitiveIndex = PrimitiveIndex - BasePrimitiveCount;
+		uint PrimitivesPerSeamEdge = TessellationFactor * 4u;
+		uint SeamEdgeIndex = SeamPrimitiveIndex / PrimitivesPerSeamEdge;
+		if (SeamEdgeIndex >= SeamEdgeCount || PrimitivesPerSeamEdge == 0u)
+		{
+			return;
+		}
+
+		uint LocalSeamPrimitiveIndex = SeamPrimitiveIndex - SeamEdgeIndex * PrimitivesPerSeamEdge;
+		uint SegmentIndex = LocalSeamPrimitiveIndex / 4u;
+		uint TriangleInSegment = LocalSeamPrimitiveIndex & 3u;
+		if (SegmentIndex >= TessellationFactor)
+		{
+			return;
+		}
+
+		uint4 SeamEdge = InputSeamEdges[SeamEdgeIndex];
+		uint TriangleA = SeamEdge.x;
+		uint EdgeA = SeamEdge.y;
+		uint TriangleB = SeamEdge.z;
+		uint EdgeB = SeamEdge.w & 0xffu;
+		uint bReverseB = (SeamEdge.w >> 8u) & 1u;
+		if (TriangleA >= SourceTriangleCount || TriangleB >= SourceTriangleCount)
+		{
+			return;
+		}
+
+		uint A0 = TriangleA * VerticesPerTriangle + GPUMeshTessellationEdgeLocalVertexIndex(EdgeA, SegmentIndex, TessellationFactor);
+		uint A1 = TriangleA * VerticesPerTriangle + GPUMeshTessellationEdgeLocalVertexIndex(EdgeA, SegmentIndex + 1u, TessellationFactor);
+		uint BStep0 = bReverseB != 0u ? TessellationFactor - SegmentIndex : SegmentIndex;
+		uint BStep1 = bReverseB != 0u ? TessellationFactor - (SegmentIndex + 1u) : SegmentIndex + 1u;
+		uint B0 = TriangleB * VerticesPerTriangle + GPUMeshTessellationEdgeLocalVertexIndex(EdgeB, BStep0, TessellationFactor);
+		uint B1 = TriangleB * VerticesPerTriangle + GPUMeshTessellationEdgeLocalVertexIndex(EdgeB, BStep1, TessellationFactor);
+
+		uint OutputIndex = PrimitiveIndex * 3u;
+		if (TriangleInSegment == 0u)
+		{
+			OutputIndices[OutputIndex + 0u] = A0;
+			OutputIndices[OutputIndex + 1u] = A1;
+			OutputIndices[OutputIndex + 2u] = B0;
+		}
+		else if (TriangleInSegment == 1u)
+		{
+			OutputIndices[OutputIndex + 0u] = B0;
+			OutputIndices[OutputIndex + 1u] = A1;
+			OutputIndices[OutputIndex + 2u] = B1;
+		}
+		else if (TriangleInSegment == 2u)
+		{
+			OutputIndices[OutputIndex + 0u] = A0;
+			OutputIndices[OutputIndex + 1u] = B0;
+			OutputIndices[OutputIndex + 2u] = A1;
+		}
+		else
+		{
+			OutputIndices[OutputIndex + 0u] = B0;
+			OutputIndices[OutputIndex + 1u] = B1;
+			OutputIndices[OutputIndex + 2u] = A1;
+		}
+
+		return;
+	}
+
+	uint SourceTriangleIndex = PrimitiveIndex / PrimitivesPerSourceTriangle;
+	uint LocalPrimitiveIndex = PrimitiveIndex - SourceTriangleIndex * PrimitivesPerSourceTriangle;
+
+	uint Row = 0u;
+	uint Remaining = LocalPrimitiveIndex;
+	[loop]
+	while (Row < TessellationFactor)
+	{
+		uint RowPrimitiveCount = 2u * (TessellationFactor - Row) - 1u;
+		if (Remaining < RowPrimitiveCount)
+		{
+			break;
+		}
+		Remaining -= RowPrimitiveCount;
+		Row++;
+	}
+
+	uint Col = Remaining / 2u;
+	bool bUpperTriangle = (Remaining & 1u) != 0u;
+	uint BaseVertex = SourceTriangleIndex * VerticesPerTriangle;
+
+	uint A;
+	uint B;
+	uint C;
+	if (!bUpperTriangle)
+	{
+		A = GPUMeshTessellationVertexIndex(Row, Col, TessellationFactor);
+		B = GPUMeshTessellationVertexIndex(Row + 1u, Col, TessellationFactor);
+		C = GPUMeshTessellationVertexIndex(Row, Col + 1u, TessellationFactor);
+	}
+	else
+	{
+		A = GPUMeshTessellationVertexIndex(Row, Col + 1u, TessellationFactor);
+		B = GPUMeshTessellationVertexIndex(Row + 1u, Col, TessellationFactor);
+		C = GPUMeshTessellationVertexIndex(Row + 1u, Col + 1u, TessellationFactor);
+	}
+
+	uint OutputIndex = PrimitiveIndex * 3u;
+	OutputIndices[OutputIndex + 0u] = BaseVertex + A;
+	OutputIndices[OutputIndex + 1u] = BaseVertex + B;
+	OutputIndices[OutputIndex + 2u] = BaseVertex + C;
+}
+
+bool GPUMeshTessellationIsValidLocalCoord(int Row, int Col, uint Factor)
+{
+	if (Row < 0 || Col < 0)
+	{
+		return false;
+	}
+
+	return (uint)(Row + Col) <= Factor;
+}
+
+float3 GPUMeshTessellationReadLocalPosition(uint SourceTriangleIndex, int Row, int Col, uint Factor, uint VerticesPerSourceTriangle)
+{
+	uint LocalVertexIndex = GPUMeshTessellationVertexIndex((uint)Row, (uint)Col, Factor);
+	return InputGeneratedPositions[SourceTriangleIndex * VerticesPerSourceTriangle + LocalVertexIndex];
+}
+
+void GPUMeshTessellationAccumulateLocalNormal(
+	uint SourceTriangleIndex,
+	int Row,
+	int Col,
+	int RowA,
+	int ColA,
+	int RowB,
+	int ColB,
+	uint Factor,
+	uint VerticesPerSourceTriangle,
+	float3 CenterPosition,
+	inout float3 NormalSum)
+{
+	if (!GPUMeshTessellationIsValidLocalCoord(RowA, ColA, Factor) || !GPUMeshTessellationIsValidLocalCoord(RowB, ColB, Factor))
+	{
+		return;
+	}
+
+	float3 A = GPUMeshTessellationReadLocalPosition(SourceTriangleIndex, RowA, ColA, Factor, VerticesPerSourceTriangle) - CenterPosition;
+	float3 B = GPUMeshTessellationReadLocalPosition(SourceTriangleIndex, RowB, ColB, Factor, VerticesPerSourceTriangle) - CenterPosition;
+	float3 FaceNormal = cross(A, B);
+	if (dot(FaceNormal, FaceNormal) > 1.0e-16)
+	{
+		NormalSum += FaceNormal;
+	}
+}
+
+[numthreads(THREADGROUP_SIZE, 1, 1)]
+void GenerateMeshTessellationNormalsCS(uint3 ThreadId : SV_DispatchThreadID)
+{
+	uint VertexIndex = ThreadId.x;
+	if (VertexIndex >= OutputVertexCount || TessellationFactor == 0u || VerticesPerTriangle == 0u)
+	{
+		return;
+	}
+
+	uint SourceTriangleIndex = VertexIndex / VerticesPerTriangle;
+	uint LocalVertexIndex = VertexIndex - SourceTriangleIndex * VerticesPerTriangle;
+	if (SourceTriangleIndex >= SourceTriangleCount)
+	{
+		return;
+	}
+
+	uint RowU;
+	uint ColU;
+	GPUMeshTessellationDecodeVertex(LocalVertexIndex, TessellationFactor, RowU, ColU);
+
+	int Row = (int)RowU;
+	int Col = (int)ColU;
+	float3 CenterPosition = InputGeneratedPositions[VertexIndex];
+	float3 BaseNormal = GPUMeshSafeNormalize(InputBaseNormals[VertexIndex], float3(0.0, 0.0, 1.0));
+	float3 NormalSum = float3(0.0, 0.0, 0.0);
+
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row + 1, Col,     Row,     Col + 1, TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row,     Col + 1, Row - 1, Col + 1, TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row - 1, Col + 1, Row - 1, Col,     TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row - 1, Col,     Row,     Col - 1, TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row,     Col - 1, Row + 1, Col - 1, TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+	GPUMeshTessellationAccumulateLocalNormal(SourceTriangleIndex, Row, Col, Row + 1, Col - 1, Row + 1, Col,     TessellationFactor, VerticesPerTriangle, CenterPosition, NormalSum);
+
+	float3 GeneratedNormal = GPUMeshSafeNormalize(NormalSum, BaseNormal);
+	if (dot(GeneratedNormal, BaseNormal) < 0.0)
+	{
+		GeneratedNormal = -GeneratedNormal;
+	}
+
+	OutputNormals[VertexIndex] = GeneratedNormal;
+}
