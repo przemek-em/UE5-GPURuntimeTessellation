@@ -9,7 +9,6 @@ Compute shader based runtime tessellation for Unreal Engine 5.7.
 
 The plugin is actor/component driven: it builds renderable GPU geometry buffers from planar grids, static meshes, scalar height textures, vector displacement textures, and procedural ocean settings. It does not rely on UE material tessellation, hull/domain shaders, or a material custom-output node to create geometry.
 
-This README has been refreshed against the current source and `tessellation_changes.diff`.
 
 ## Current Status
 
@@ -57,6 +56,7 @@ The easiest workflow is to place one of the actors instead of manually attaching
 | `GPU Tessellation Actor` | Planar heightfields, large terrain planes, quadtree patches, ocean-like surfaces | `UGPUTessellationComponent` |
 | `GPU Mesh Tessellation Actor` | Tessellating an existing `UStaticMesh` such as a cube, rock, prop, or imported mesh | `UGPUMeshTessellationComponent` |
 | `GPU Vector Displacement Actor` | RGB/RGBA vector displacement maps that move vertices in X/Y/Z, not only along height | `UGPUVectorDisplacementComponent` |
+| `GPU Ocean Component` | Procedural water surfaces driven by Gerstner, FFT/Tessendorf, or Perlin fBm displacement (place actor or create blueprint with GPU Ocean component) | `UGPUOceanComponent` |
 
 The actors expose editor-callable buttons for the common actions:
 
