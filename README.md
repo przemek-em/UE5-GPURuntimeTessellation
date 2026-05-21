@@ -107,6 +107,11 @@ Recommended import source for high precision vector displacement is linear OpenE
 
 Height-field traces and coarse height-field collision do not understand lateral X/Y vector offsets. For exact vector-displaced collision, use vertex-perfect readback, full patch collision, or bake to a static mesh.
 
+## Baking Vector Displacement Map
+
+You can use my standalone tool to bake vector displacement maps.
+[VDMBaker](https://github.com/przemek-em/VDMBaker)
+
 ## LOD Modes
 
 Planar tessellation uses `EGPUTessellationLODMode`:
