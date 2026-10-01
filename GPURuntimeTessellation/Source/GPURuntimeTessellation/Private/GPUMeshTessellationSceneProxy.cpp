@@ -1,6 +1,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 
 #include "GPUMeshTessellationSceneProxy.h"
+#include "GPUTessellationRendering.h"
 
 #include "GPUMeshTessellationMeshBuilder.h"
 #include "Materials/Material.h"
@@ -28,10 +29,9 @@ FGPUMeshTessellationSceneProxy::FGPUMeshTessellationSceneProxy(
 	bVFRequiresPrimitiveUniformBuffer = true;
 	bSupportsGPUScene = false;
 	bWillEverBeLit = true;
-	bCastDynamicShadow = true;
 	bCastStaticShadow = false;
-	bAffectDynamicIndirectLighting = true;
-	bAffectDistanceFieldLighting = true;
+	// Source static mesh distance fields do not represent the displaced GPU mesh.
+	bAffectDistanceFieldLighting = false;
 
 	const int32 MaterialCount = FMath::Max(Component->GetNumMaterials(), 1);
 	MaterialProxies.Reserve(MaterialCount);
@@ -213,15 +213,7 @@ void FGPUMeshTessellationSceneProxy::RenderMesh(
 		const bool bSubmitVSMShadowMesh = bIsShadowView && bNonNaniteVSMEnabled && SelectedShadowVertexFactory.IsInitialized();
 
 		FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-		DynamicPrimitiveUniformBuffer.Set(
-			Collector.GetRHICommandList(),
-			GetLocalToWorld(),
-			GetLocalToWorld(),
-			WorldBounds,
-			LocalBounds,
-			false,
-			false,
-			false);
+		SetGPUTessellationPrimitiveUniformBuffer(*this, Collector, WorldBounds, LocalBounds, DynamicPrimitiveUniformBuffer);
 
 		for (const FGPUMeshTessellationSection& Section : SelectedBuildData.Sections)
 		{
@@ -344,8 +336,7 @@ FPrimitiveViewRelevance FGPUMeshTessellationSceneProxy::GetViewRelevance(const F
 	Result.bRenderCustomDepth = ShouldRenderCustomDepth();
 	Result.bTranslucentSelfShadow = bCastVolumetricTranslucentShadow;
 	Result.bRenderInDepthPass = ShouldRenderInDepthPass();
-	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
-
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
+	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 	return Result;
 }

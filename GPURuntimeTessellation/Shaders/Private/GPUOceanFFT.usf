@@ -40,9 +40,9 @@ RWTexture2D<float2> SpectrumHeightOut;          // Complex H~(k,t)
 RWTexture2D<float2> SpectrumDisplacementXOut;   // Complex -i*kx/|k|*H~(k,t)
 RWTexture2D<float2> SpectrumDisplacementYOut;   // Complex -i*ky/|k|*H~(k,t)
 
-RWTexture2D<float2> SpectrumHeightInOut;
-RWTexture2D<float2> SpectrumDisplacementXInOut;
-RWTexture2D<float2> SpectrumDisplacementYInOut;
+Texture2D<float2> SpectrumHeightIn;
+Texture2D<float2> SpectrumDisplacementXIn;
+Texture2D<float2> SpectrumDisplacementYIn;
 
 RWTexture2D<float4> DisplacementMapOut;         // XY horizontal, Z height, W reserved
 
@@ -216,15 +216,15 @@ void FFTRowCS(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, u
 	uint Row = GID.x;
 	uint Src = OceanFFTBitReverse(TID);
 
-	OceanFFTHeightBuffer[TID] = SpectrumHeightInOut[uint2(Src, Row)];
-	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXInOut[uint2(Src, Row)];
-	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYInOut[uint2(Src, Row)];
+	OceanFFTHeightBuffer[TID] = SpectrumHeightIn.Load(int3(Src, Row, 0));
+	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXIn.Load(int3(Src, Row, 0));
+	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYIn.Load(int3(Src, Row, 0));
 
 	OceanFFTPerformInverse(TID);
 
-	SpectrumHeightInOut[uint2(TID, Row)] = OceanFFTHeightBuffer[TID];
-	SpectrumDisplacementXInOut[uint2(TID, Row)] = OceanFFTDisplacementXBuffer[TID];
-	SpectrumDisplacementYInOut[uint2(TID, Row)] = OceanFFTDisplacementYBuffer[TID];
+	SpectrumHeightOut[uint2(TID, Row)] = OceanFFTHeightBuffer[TID];
+	SpectrumDisplacementXOut[uint2(TID, Row)] = OceanFFTDisplacementXBuffer[TID];
+	SpectrumDisplacementYOut[uint2(TID, Row)] = OceanFFTDisplacementYBuffer[TID];
 }
 
 [numthreads(OCEAN_FFT_N, 1, 1)]
@@ -234,9 +234,9 @@ void FFTColCS(uint3 DTid : SV_DispatchThreadID, uint3 GTid : SV_GroupThreadID, u
 	uint Col = GID.x;
 	uint Src = OceanFFTBitReverse(TID);
 
-	OceanFFTHeightBuffer[TID] = SpectrumHeightInOut[uint2(Col, Src)];
-	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXInOut[uint2(Col, Src)];
-	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYInOut[uint2(Col, Src)];
+	OceanFFTHeightBuffer[TID] = SpectrumHeightIn.Load(int3(Col, Src, 0));
+	OceanFFTDisplacementXBuffer[TID] = SpectrumDisplacementXIn.Load(int3(Col, Src, 0));
+	OceanFFTDisplacementYBuffer[TID] = SpectrumDisplacementYIn.Load(int3(Col, Src, 0));
 
 	OceanFFTPerformInverse(TID);
 

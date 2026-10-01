@@ -229,6 +229,7 @@ public:
 #endif
 
 	virtual FPrimitiveSceneProxy* CreateSceneProxy() override;
+	virtual void CollectPSOPrecacheData(const FPSOPrecacheParams& BaseParams, FMaterialInterfacePSOPrecacheParamsList& OutParams) override;
 	virtual FBoxSphereBounds CalcBounds(const FTransform& LocalToWorld) const override;
 	virtual bool SetStaticMesh(UStaticMesh* NewMesh) override;
 	virtual void TickComponent(float DeltaTime, enum ELevelTick TickType, FActorComponentTickFunction* ThisTickFunction) override;

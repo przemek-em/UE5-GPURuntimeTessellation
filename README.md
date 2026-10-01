@@ -21,6 +21,7 @@ The plugin is actor/component driven: it builds renderable GPU geometry buffers 
 ## Main Features
 
 - **Planar GPU tessellation** through `UGPUTessellationComponent` and `AGPUTessellationActor`.
+- **Experimental tiled heightfields** through `UGPUTiledTessellationComponent` and `AGPUTiledTessellationActor`: separate heightmaps, continuous UVs, neighbor-aware normals, tile culling, and a geometry budget. See [current findings and usage](TILED_TESSELLATION_RENDERER_FINDINGS.md); streaming and adaptive tile LOD remain future work.
 - **Arbitrary static mesh tessellation** through `UGPUMeshTessellationComponent` and `AGPUMeshTessellationActor`.
 - **Vector displacement maps** through `UGPUVectorDisplacementComponent` and `AGPUVectorDisplacementActor`.
 - **Procedural ocean displacement** through `UGPUOceanComponent`.
@@ -49,14 +50,15 @@ Short version: visual tessellation rendering stays on the GPU-buffer path; tooli
 
 ## Actor Workflows
 
-The easiest workflow is to place one of the actors instead of manually attaching components.
+The easiest workflow is to place one of the actors instead of manually attaching components. Ocean rendering is currently exposed as a component workflow.
 
 | Actor | Use For | Backing Component |
 | --- | --- | --- |
 | `GPU Tessellation Actor` | Planar heightfields, large terrain planes, quadtree patches, ocean-like surfaces | `UGPUTessellationComponent` |
+| `GPU Tiled Tessellation Actor` | Fixed-density terrain from multiple matching heightmap tiles | `UGPUTiledTessellationComponent` |
 | `GPU Mesh Tessellation Actor` | Tessellating an existing `UStaticMesh` such as a cube, rock, prop, or imported mesh | `UGPUMeshTessellationComponent` |
 | `GPU Vector Displacement Actor` | RGB/RGBA vector displacement maps that move vertices in X/Y/Z, not only along height | `UGPUVectorDisplacementComponent` |
-| `GPU Ocean Component` | Procedural water surfaces driven by Gerstner, FFT/Tessendorf, or Perlin fBm displacement (place actor or create blueprint with GPU Ocean component) | `UGPUOceanComponent` |
+| `GPU Ocean Component` | Procedural water surfaces driven by Gerstner, FFT/Tessendorf, or Perlin fBm displacement | `UGPUOceanComponent` |
 
 The actors expose editor-callable buttons for the common actions:
 
@@ -203,14 +205,19 @@ For tangent-space normal maps on generated geometry, make sure the material setu
 
 ## Renderer Feature Compatibility
 
-2026-05-21:
+2026-10-01: updated against this workspace. Detailed findings, implementation scope, and remaining work are in [TILED_TESSELLATION_RENDERER_FINDINGS.md](TILED_TESSELLATION_RENDERER_FINDINGS.md).
+
+Sunlight/normal behavior, shadow caster fixes, and distant-terrain setup are covered in [TERRAIN_SHADOW_LIGHTING_FINDINGS.md](TERRAIN_SHADOW_LIGHTING_FINDINGS.md).
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Motion vectors / velocity | Not reliable yet | Scene proxies set velocity relevance, but dynamic primitive uniform buffers currently use the current transform as `PreviousLocalToWorld` and pass `bOutputVelocity = false`. The plugin also does not keep previous GPU-displaced vertex buffers, so animated displacement, quadtree changes, and ocean motion should not be treated as having correct motion vectors. |
-| Generated mesh distance fields | Not implemented | Components/proxies set `bAffectDistanceFieldLighting = true`, but the plugin does not build or update mesh distance-field volume data for generated/tessellated vertices. Runtime generated geometry should not be expected to contribute correct distance-field shadows, DFAO, or software distance-field traces. |
-| Static lighting UVs | Not implemented for runtime meshes | Runtime meshes are dynamic. Baked static meshes currently use lightmap coordinate index 0 and set `bGenerateLightmapUVs = false`, so author or generate proper lightmap UVs after bake if static lighting is needed. |
-| PSO precaching | Not implemented explicitly | The vertex factory registers default/depth declarations for draw compatibility, but there is no plugin PSO precache collection path. Expect normal shader/PSO warmup behavior rather than guaranteed precached PSOs. |
+| Motion vectors / velocity | Transform history wired; deformation incomplete | Proxies use scene-provided previous transforms and output-velocity state, with material opacity applied before velocity relevance. Previous GPU-displaced vertex buffers are still absent, so animated displacement, remeshing, quadtree changes, and ocean motion do not have complete deformation vectors. |
+| Generated mesh distance fields | Not implemented | Runtime proxies disable their unsupported distance-field-lighting flag. They do not build mesh distance-field volume data; distance-field shadows, DFAO, and software distance-field traces require a baked asset or further integration. |
+| Static lighting UVs | Generated for editor bakes; absent at runtime | The common static-mesh baker requests lightmap UV repacking from UV0 into UV1 and assigns lightmap coordinate index 1. Inspect complex source UV charts before a lighting bake. Runtime meshes remain dynamic. |
+| PSO precaching | Component collection implemented | Both vertex factories expose matching precache declarations and support flags. Planar, mesh, vector/ocean through inheritance, and tiled components collect material PSOs. Runtime miss/hitch validation and draw-delay policy remain follow-up work. |
+| Primitive material/lighting state | Engine uniform builder integrated | Uniforms now carry engine transform history, custom primitive data, decals, lighting channels, capture selection, and volumetric-lightmap state. Scene-depth capture and transform updates are tested; visual lighting/velocity checks remain necessary. |
+| Raster terrain shadows | Shadow-view culling and height-mode bias normals corrected | Patch/quadtree casters use the light's caster volume instead of the camera frustum. Tiled shadow culling also handles pre-shadow translation. Proxies respect component dynamic-shadow settings. From Height Texture now supplies geometric vertex normals to conventional slope bias while retaining detailed pixel normals. Distant terrain needs adequate raster shadow coverage/resolution and, for far cascades, Far Shadow enabled; distance-field/ray-traced terrain shadows remain unsupported. |
+| Normal transforms | Nonuniform scale corrected | Shared material, height-texture, and normal-only paths use inverse-transpose normals with orthogonal tangents and transform/source handedness. Detailed normals still do not add shadow-casting geometry. |
 | Ambient occlusion | Partially expected, not fully verified | Screen-space/depth based AO can see the generated mesh through normal rendering/depth passes. Distance-field AO and static/baked AO should be considered unsupported for runtime generated geometry until generated distance fields and static lighting data exist. |
 
 ## Tessellation Dispatch Changes
@@ -227,7 +234,7 @@ The current branch contains important low-level changes that affect the whole te
 - Generated RDG buffers are converted to external pooled buffers and the pooled wrappers are kept alive. This prevents the RDG transient pool from reusing the same underlying RHI memory while the scene proxy still has SRVs pointing at it.
 - Patch and quadtree generation reuse the same safer dispatch path, including edge-collapse factors for LOD stitching.
 - Arbitrary mesh tessellation adds its own compute pipeline with vertex, index, normal, tangent, UV, and seam-stitching buffers, also using 1D dispatch sized by output vertex/primitive counts.
-- Normal generation is dispatched only when the selected normal mode needs generated normals. Height-texture normal paths are kept consistent with the displacement source.
+- Normal generation is dispatched for enabled normal modes. From Height Texture uses geometric vertex normals for shadow bias and vertex material expressions, with detailed pixel normals sampled separately from the height source.
 - Ocean FFT displacement is produced as an RDG texture pre-pass and sampled by displacement/normal passes through the same pipeline.
 
 These changes are the reason the standard cube/corner corruption issue was fixed and why generated buffers remain stable across later renderer passes such as VSM, Lumen, and post-process RDG work.
@@ -280,6 +287,15 @@ Tess->UpdateTessellatedMesh();
 - For dynamic height textures, try `From Height Texture / Render Target`.
 - Adjust `Height Texture Normal Texel Step`, `Height Texture Normal Strength`, and `Vertex Normal Intensity`.
 - Confirm the material expects the same normal space being provided.
+
+### Terrain looks sunlit behind a mountain
+
+- A sun hidden from the camera can still light exposed facets. Fully occluded direct sunlight should be shadowed; skylight, reflections, and indirect lighting can retain normal detail.
+- Rebuild/restart after updating the plugin. The patch/quadtree renderer now keeps offscreen shadow casters in the light volume.
+- Check Cast Shadow and Dynamic Shadow. For distant terrain, enable Lighting > Advanced > Far Shadow and configure the directional light's raster shadow coverage. These generated meshes have no distance-field or ray-tracing representation.
+- For conventional maps, distribute long distances over multiple cascades. The reported 4096-scale, 40.96 km terrain improved significantly when its 20 km dynamic shadow range used 4 cascades instead of 1. More cascades do not add terrain triangles; tune quadtree detail separately.
+- Inspect the VSM Shadow Mask, then compare Geometry Based normals with material normal detail disconnected and higher actual tessellation. Fine height-texture normals can exceed the geometry's shadow detail.
+- See [the lighting investigation](TERRAIN_SHADOW_LIGHTING_FINDINGS.md) for confirmed fixes and validation scope.
 
 ### Collision lags or appears late
 

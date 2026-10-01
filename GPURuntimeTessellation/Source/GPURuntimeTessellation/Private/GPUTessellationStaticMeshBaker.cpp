@@ -479,13 +479,16 @@ UStaticMesh* BakeGPUTessellationMeshDataToStaticMesh(
 	StaticMesh->SetLightingGuid();
 	StaticMesh->SetStaticMaterials(StaticMaterials);
 	StaticMesh->SetImportVersion(EImportStaticMeshVersion::LastVersion);
-	StaticMesh->SetLightMapCoordinateIndex(0);
+	StaticMesh->SetLightMapCoordinateIndex(1);
 
 	StaticMesh->SetNumSourceModels(1);
 	FMeshBuildSettings& BuildSettings = StaticMesh->GetSourceModel(0).BuildSettings;
 	BuildSettings.bRecomputeNormals = false;
 	BuildSettings.bRecomputeTangents = true;
-	BuildSettings.bGenerateLightmapUVs = false;
+	BuildSettings.bGenerateLightmapUVs = true;
+	BuildSettings.SrcLightmapIndex = 0;
+	BuildSettings.DstLightmapIndex = 1;
+	BuildSettings.MinLightmapResolution = 64;
 	BuildSettings.bRemoveDegenerates = false;
 	BuildSettings.bUseFullPrecisionUVs = true;
 

@@ -1,0 +1,56 @@
+// Licensed under the MIT License. See LICENSE file in the project root.
+#include "/Engine/Private/Common.ush"
+
+uint Resolution;
+float2 TileSize;
+float2 TileCoordinate;
+float2 HeightmapSize;
+int4 HasNeighbors; // west, east, south, north
+float HeightScale;
+float HeightOffset;
+Texture2D Heightmap;
+Texture2D WestHeightmap;
+Texture2D EastHeightmap;
+Texture2D SouthHeightmap;
+Texture2D NorthHeightmap;
+SamplerState HeightSampler;
+RWStructuredBuffer<float3> OutputPositions;
+RWStructuredBuffer<float3> OutputNormals;
+RWStructuredBuffer<float2> OutputUVs;
+
+// Duplicated border texels represent the same world position. Sample texel centers,
+// so a heightmap with N samples covers exactly N-1 intervals (including both ends).
+float2 SampleUV(float2 UV)
+{
+	return (saturate(UV) * (HeightmapSize - 1.0) + 0.5) / HeightmapSize;
+}
+
+float SampleHeight(float2 UV)
+{
+	float Value;
+	if (UV.x < 0 && HasNeighbors.x) { Value = WestHeightmap.SampleLevel(HeightSampler, SampleUV(UV + float2(1, 0)), 0).r; }
+	else if (UV.x > 1 && HasNeighbors.y) { Value = EastHeightmap.SampleLevel(HeightSampler, SampleUV(UV - float2(1, 0)), 0).r; }
+	else if (UV.y < 0 && HasNeighbors.z) { Value = SouthHeightmap.SampleLevel(HeightSampler, SampleUV(UV + float2(0, 1)), 0).r; }
+	else if (UV.y > 1 && HasNeighbors.w) { Value = NorthHeightmap.SampleLevel(HeightSampler, SampleUV(UV - float2(0, 1)), 0).r; }
+	else { Value = Heightmap.SampleLevel(HeightSampler, SampleUV(UV), 0).r; }
+	return saturate(Value) * HeightScale + HeightOffset;
+}
+
+[numthreads(64, 1, 1)]
+void MainCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+	uint Index = DispatchThreadId.x;
+	if (Index >= Resolution * Resolution) { return; }
+	float2 UV = float2(Index % Resolution, Index / Resolution) / float(Resolution - 1);
+	float2 Step = 1.0 / (HeightmapSize - 1.0);
+	// One-sided derivatives at missing neighbors; central differences across loaded neighbors.
+	float West = HasNeighbors.x ? Step.x : min(Step.x, UV.x);
+	float East = HasNeighbors.y ? Step.x : min(Step.x, 1.0 - UV.x);
+	float South = HasNeighbors.z ? Step.y : min(Step.y, UV.y);
+	float North = HasNeighbors.w ? Step.y : min(Step.y, 1.0 - UV.y);
+	float DX = (SampleHeight(UV + float2(East, 0)) - SampleHeight(UV - float2(West, 0))) / (TileSize.x * (East + West));
+	float DY = (SampleHeight(UV + float2(0, North)) - SampleHeight(UV - float2(0, South))) / (TileSize.y * (North + South));
+	OutputPositions[Index] = float3((TileCoordinate + UV) * TileSize, SampleHeight(UV));
+	OutputNormals[Index] = normalize(float3(-DX, -DY, 1));
+	OutputUVs[Index] = TileCoordinate + UV;
+}

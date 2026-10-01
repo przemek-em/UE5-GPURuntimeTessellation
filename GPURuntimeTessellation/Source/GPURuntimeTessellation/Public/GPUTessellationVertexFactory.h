@@ -50,6 +50,7 @@ public:
 	 * Should we cache vertex factory shader permutations
 	 */
 	static bool ShouldCompilePermutation(const FVertexFactoryShaderPermutationParameters& Parameters);
+	static void GetPSOPrecacheVertexFetchElements(EVertexInputStreamType InputStreamType, FVertexDeclarationElementList& Elements);
 
 	/**
 	 * Modify compile environment for this vertex factory
@@ -85,6 +86,7 @@ class FGPUTessellationGPUSceneVertexFactory : public FGPUTessellationVertexFacto
 
 public:
 	FGPUTessellationGPUSceneVertexFactory(ERHIFeatureLevel::Type InFeatureLevel);
+	static void GetPSOPrecacheVertexFetchElements(EVertexInputStreamType InputStreamType, FVertexDeclarationElementList& Elements);
 
 	virtual void InitRHI(FRHICommandListBase& RHICmdList) override;
 };

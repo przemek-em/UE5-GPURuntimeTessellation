@@ -22,22 +22,9 @@ FGPUTessellationMeshBuilder::FGPUTessellationMeshBuilder()
 
 namespace
 {
-	bool ShouldDispatchGPUTessellationVertexNormalCalculation(const FGPUTessellationSettings& Settings, UTexture* DisplacementTexture)
+	bool ShouldDispatchGPUTessellationVertexNormalCalculation(const FGPUTessellationSettings& Settings)
 	{
-		if (Settings.NormalCalculationMethod == EGPUTessellationNormalMethod::Disabled)
-		{
-			return false;
-		}
-
-		// Pure height texture normal mode is handled in the vertex factory pixel shader when a
-		// component height texture/render target is available. Keep the mesh normal buffer flat so
-		// low-LOD vertex-normal interpolation cannot show through the generated height normal.
-		if (Settings.NormalCalculationMethod == EGPUTessellationNormalMethod::FromHeightTexture && DisplacementTexture != nullptr)
-		{
-			return false;
-		}
-
-		return true;
+		return Settings.NormalCalculationMethod != EGPUTessellationNormalMethod::Disabled;
 	}
 
 	int32 ApplyGPUTessellationSubdivisionMultiplier(int32 TessellationFactor, const FGPUTessellationSettings& Settings)
@@ -61,9 +48,17 @@ namespace
 		return Settings.bUseVectorDisplacement && VectorDisplacementTexture != nullptr;
 	}
 
-	FGPUTessellationSettings GetGPUTessellationNormalSettings(const FGPUTessellationSettings& Settings, UTexture* VectorDisplacementTexture)
+	FGPUTessellationSettings GetGPUTessellationNormalSettings(const FGPUTessellationSettings& Settings, UTexture* DisplacementTexture, UTexture* VectorDisplacementTexture)
 	{
 		FGPUTessellationSettings NormalSettings = Settings;
+		if (!Settings.bUseVectorDisplacement && Settings.NormalCalculationMethod == EGPUTessellationNormalMethod::FromHeightTexture && DisplacementTexture != nullptr)
+		{
+			// Pixel normals still sample the full-resolution heightmap in the VF. Vertex
+			// normals must describe the displaced mesh for CSM slope bias and material WPO;
+			// leaving them flat made mountains behave like horizontal planes in those passes.
+			NormalSettings.NormalCalculationMethod = EGPUTessellationNormalMethod::GeometryBased;
+			NormalSettings.NormalIntensity = 1.0f;
+		}
 		if (HasActiveGPUTessellationVectorDisplacement(Settings, VectorDisplacementTexture) &&
 			NormalSettings.NormalCalculationMethod != EGPUTessellationNormalMethod::Disabled &&
 			NormalSettings.NormalCalculationMethod != EGPUTessellationNormalMethod::FromNormalMap)
@@ -234,8 +229,8 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	DispatchDisplacement(GraphBuilder, Settings, Resolution, LocalToWorld, DisplacementTexture, SubtractTexture, VectorDisplacementTexture, VertexBuffer, NormalBuffer, UVBuffer);
 
 	// Step 3: Calculate normals (if enabled)
-	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(Settings, VectorDisplacementTexture);
-	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings, DisplacementTexture))
+	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(Settings, DisplacementTexture, VectorDisplacementTexture);
+	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings))
 	{
 		DispatchNormalCalculation(GraphBuilder, NormalSettings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
@@ -812,8 +807,8 @@ void FGPUTessellationMeshBuilder::ExecuteTessellationPipeline(
 	DispatchDisplacement(GraphBuilder, Settings, Resolution, LocalToWorld, DisplacementTexture, SubtractTexture, VectorDisplacementTexture, VertexBuffer, NormalBuffer, UVBuffer);
 
 	// Step 3: Calculate normals (if enabled)
-	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(Settings, VectorDisplacementTexture);
-	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings, DisplacementTexture))
+	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(Settings, DisplacementTexture, VectorDisplacementTexture);
+	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings))
 	{
 		DispatchNormalCalculation(GraphBuilder, NormalSettings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}
@@ -1494,8 +1489,8 @@ void FGPUTessellationMeshBuilder::GenerateSinglePatch(
 	DispatchDisplacement(GraphBuilder, PatchSettings, Resolution, LocalToWorld, DisplacementTexture, SubtractTexture, VectorDisplacementTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	
 	// Step 3: Calculate normals if enabled (also use patch settings for consistent plane size)
-	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(PatchSettings, VectorDisplacementTexture);
-	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings, DisplacementTexture))
+	const FGPUTessellationSettings NormalSettings = GetGPUTessellationNormalSettings(PatchSettings, DisplacementTexture, VectorDisplacementTexture);
+	if (ShouldDispatchGPUTessellationVertexNormalCalculation(NormalSettings))
 	{
 		DispatchNormalCalculation(GraphBuilder, NormalSettings, Resolution, DisplacementTexture, SubtractTexture, NormalMapTexture, VertexBuffer, NormalBuffer, UVBuffer);
 	}

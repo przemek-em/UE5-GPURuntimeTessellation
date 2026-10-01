@@ -159,13 +159,15 @@ IMPLEMENT_VERTEX_FACTORY_TYPE(FGPUTessellationVertexFactory, "/Plugin/GPURuntime
 	EVertexFactoryFlags::SupportsPositionOnly |
 	// Depth/shadow passes still need manual fetch support because all vertex data
 	// comes from SRVs rather than traditional vertex streams.
-	EVertexFactoryFlags::SupportsManualVertexFetch);
+	EVertexFactoryFlags::SupportsManualVertexFetch |
+	EVertexFactoryFlags::SupportsPSOPrecaching);
 
 IMPLEMENT_VERTEX_FACTORY_TYPE(FGPUTessellationGPUSceneVertexFactory, "/Plugin/GPURuntimeTessellation/Private/GPUTessellationVertexFactory.ush",
 	EVertexFactoryFlags::UsedWithMaterials |
 	EVertexFactoryFlags::SupportsDynamicLighting |
 	EVertexFactoryFlags::SupportsPrimitiveIdStream |
-	EVertexFactoryFlags::SupportsManualVertexFetch);
+	EVertexFactoryFlags::SupportsManualVertexFetch |
+	EVertexFactoryFlags::SupportsPSOPrecaching);
 
 FGPUTessellationVertexFactory::FGPUTessellationVertexFactory(ERHIFeatureLevel::Type InFeatureLevel)
 	: FVertexFactory(InFeatureLevel)
@@ -255,6 +257,22 @@ bool FGPUTessellationVertexFactory::ShouldCompilePermutation(const FVertexFactor
 		    Parameters.MaterialParameters.bIsUsedWithSkeletalMesh ||
 		    Parameters.MaterialParameters.bIsDefaultMaterial ||
 		    Parameters.MaterialParameters.MaterialDomain == MD_Surface);
+}
+
+void FGPUTessellationVertexFactory::GetPSOPrecacheVertexFetchElements(EVertexInputStreamType InputStreamType, FVertexDeclarationElementList& Elements)
+{
+	// InitRHI uses empty declarations for every stream: all attributes use SV_VertexID.
+	Elements.Reset();
+}
+
+void FGPUTessellationGPUSceneVertexFactory::GetPSOPrecacheVertexFetchElements(EVertexInputStreamType InputStreamType, FVertexDeclarationElementList& Elements)
+{
+	Elements.Reset();
+	if (InputStreamType == EVertexInputStreamType::Default && UseGPUScene(GMaxRHIShaderPlatform)
+		&& !PlatformGPUSceneUsesUniformBufferView(GMaxRHIShaderPlatform) && GMaxRHIFeatureLevel > ERHIFeatureLevel::ES3_1)
+	{
+		Elements.Add(FVertexElement(0, 0, VET_UInt, 13, 0, true));
+	}
 }
 
 void FGPUTessellationVertexFactory::ModifyCompilationEnvironment(const FVertexFactoryShaderPermutationParameters& Parameters, FShaderCompilerEnvironment& OutEnvironment)

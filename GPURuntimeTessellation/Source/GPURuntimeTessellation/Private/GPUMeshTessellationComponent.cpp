@@ -1,6 +1,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 
 #include "GPUMeshTessellationComponent.h"
+#include "GPUTessellationRendering.h"
 #include "GPUMeshTessellationSceneProxy.h"
 
 #include "Engine/StaticMesh.h"
@@ -329,6 +330,11 @@ UStaticMesh* UGPUMeshTessellationComponent::BakeCurrentTessellationToStaticMeshA
 	return BakedMesh;
 }
 #endif
+
+void UGPUMeshTessellationComponent::CollectPSOPrecacheData(const FPSOPrecacheParams& BaseParams, FMaterialInterfacePSOPrecacheParamsList& OutParams)
+{
+	CollectGPUTessellationPSOPrecacheData(*this, BaseParams, OutParams);
+}
 
 FPrimitiveSceneProxy* UGPUMeshTessellationComponent::CreateSceneProxy()
 {

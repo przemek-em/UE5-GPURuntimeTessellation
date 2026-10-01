@@ -1,6 +1,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 
 #include "GPUTessellationComponent.h"
+#include "GPUTessellationRendering.h"
 #include "GPUTessellationSceneProxy.h"
 #include "GPUTessellationMeshBuilder.h"
 #include "Materials/MaterialInterface.h"
@@ -403,6 +404,7 @@ UGPUTessellationComponent::UGPUTessellationComponent(const FObjectInitializer& O
 void UGPUTessellationComponent::OnRegister()
 {
 	Super::OnRegister();
+	PrecachePSOs();
 
 	// Update bounds before scene proxy creation
 	UpdateBounds();
@@ -562,6 +564,11 @@ void UGPUTessellationComponent::TickComponent(float DeltaTime, enum ELevelTick T
 	UpdateWaterInteraction();
 	DrawCollisionMeshDebug();
 	DrawWaterInteractionDebug();
+}
+
+void UGPUTessellationComponent::CollectPSOPrecacheData(const FPSOPrecacheParams& BaseParams, FMaterialInterfacePSOPrecacheParamsList& OutParams)
+{
+	CollectGPUTessellationPSOPrecacheData(*this, BaseParams, OutParams);
 }
 
 FPrimitiveSceneProxy* UGPUTessellationComponent::CreateSceneProxy()
@@ -806,6 +813,7 @@ void UGPUTessellationComponent::SetMaterial(int32 ElementIndex, UMaterialInterfa
 	if (ElementIndex == 0)
 	{
 		Material = InMaterial;
+		PrecachePSOs();
 		MarkRenderStateDirty();
 	}
 }

@@ -52,9 +52,12 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FGPUOceanFFTRowCS, FGlobalShader);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumHeightInOut)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementXInOut)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementYInOut)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumHeightIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumDisplacementXIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumDisplacementYIn)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumHeightOut)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementXOut)
+		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementYOut)
 	END_SHADER_PARAMETER_STRUCT()
 
 	static bool ShouldCompilePermutation(const FGlobalShaderPermutationParameters& Parameters)
@@ -71,9 +74,9 @@ public:
 	SHADER_USE_PARAMETER_STRUCT(FGPUOceanFFTColCS, FGlobalShader);
 
 	BEGIN_SHADER_PARAMETER_STRUCT(FParameters, )
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumHeightInOut)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementXInOut)
-		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float2>, SpectrumDisplacementYInOut)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumHeightIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumDisplacementXIn)
+		SHADER_PARAMETER_RDG_TEXTURE(Texture2D<float2>, SpectrumDisplacementYIn)
 		SHADER_PARAMETER_RDG_TEXTURE_UAV(RWTexture2D<float4>, DisplacementMapOut)
 	END_SHADER_PARAMETER_STRUCT()
 

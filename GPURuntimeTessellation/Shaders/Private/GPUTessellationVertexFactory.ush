@@ -141,20 +141,30 @@ FVertexFactoryIntermediates GetVertexFactoryIntermediates(FVertexFactoryInput In
 	return Intermediates;
 }
 
-void BuildScaleSafeTangentToWorld(FVertexFactoryIntermediates Intermediates, out float3 TangentToWorld0, out float4 TangentToWorld2)
+float3 TransformGPUTessellationNormal(float3 LocalNormal, FDFInverseMatrix WorldToLocal)
 {
-	float3x3 TangentToWorld = mul(Intermediates.TangentToLocal, DFToFloat3x3(Intermediates.SceneData.InstanceData.LocalToWorld));
-	TangentToWorld0 = normalize(TangentToWorld[0]);
-	TangentToWorld2 = float4(normalize(TangentToWorld[2]), 1.0);
+	// A normal is perpendicular to the transformed surface. Forward-transforming it,
+	// or removing scale entirely, gives the wrong slope under nonuniform scale.
+	return SafeNormalizeUpVector(mul(LocalNormal, transpose(DFToFloat3x3(WorldToLocal))));
 }
 
-float3x3 GetPrimitiveLocalToWorld3x3(uint PrimitiveId)
+void BuildGPUTessellationTangentToWorld(float3 LocalTangent, float3 LocalNormal,
+	FDFMatrix LocalToWorld, FDFInverseMatrix WorldToLocal, float Handedness,
+	out float3 TangentToWorld0, out float4 TangentToWorld2)
 {
-#if VF_USE_PRIMITIVE_SCENE_DATA
-	return DFToFloat3x3(GetPrimitiveData(PrimitiveId).LocalToWorld);
-#else
-	return GetLocalToWorld3x3();
-#endif
+	float3 WorldNormal = TransformGPUTessellationNormal(LocalNormal, WorldToLocal);
+	float3 WorldTangent = mul(LocalTangent, DFToFloat3x3(LocalToWorld));
+	WorldTangent -= WorldNormal * dot(WorldNormal, WorldTangent);
+	TangentToWorld0 = SafeNormalizeUpVector(WorldTangent);
+	TangentToWorld2 = float4(WorldNormal, Handedness);
+}
+
+void BuildScaleSafeTangentToWorld(FVertexFactoryIntermediates Intermediates, out float3 TangentToWorld0, out float4 TangentToWorld2)
+{
+	float LocalHandedness = dot(cross(Intermediates.TangentToLocal[0], Intermediates.TangentToLocal[1]), Intermediates.Normal) < 0 ? -1 : 1;
+	BuildGPUTessellationTangentToWorld(Intermediates.TangentToLocal[0], Intermediates.Normal,
+		Intermediates.SceneData.InstanceData.LocalToWorld, Intermediates.SceneData.InstanceData.WorldToLocal,
+		LocalHandedness * Intermediates.SceneData.InstanceData.DeterminantSign, TangentToWorld0, TangentToWorld2);
 }
 
 float SampleHeightNormalTextureLinear(float2 UV)
@@ -238,10 +248,9 @@ void BuildHeightTextureTangentToWorld(float2 UV, uint PrimitiveId, out float3 Ta
 		Tangent /= TangentLength;
 	}
 
-	float3 Binormal = cross(Normal, Tangent);
-	float3x3 TangentToWorld = mul(float3x3(Tangent, Binormal, Normal), GetPrimitiveLocalToWorld3x3(PrimitiveId));
-	TangentToWorld0 = normalize(TangentToWorld[0]);
-	TangentToWorld2 = float4(normalize(TangentToWorld[2]), 1.0);
+	FPrimitiveSceneData PrimitiveData = GetPrimitiveData(PrimitiveId);
+	BuildGPUTessellationTangentToWorld(Tangent, Normal, PrimitiveData.LocalToWorld, PrimitiveData.WorldToLocal,
+		GetPrimitive_DeterminantSign_FromFlags(PrimitiveData.Flags), TangentToWorld0, TangentToWorld2);
 }
 
 FPrimitiveSceneData GetPrimitiveData(FVertexFactoryIntermediates Intermediates)
@@ -301,7 +310,7 @@ float3 VertexFactoryGetPositionForVertexLighting(FVertexFactoryInput Input, FVer
 float3 VertexFactoryGetWorldNormal(FVertexFactoryInput Input, FVertexFactoryIntermediates Intermediates)
 {
 	// Transform normal from local space to world space
-	return RotateLocalToWorld(Intermediates.Normal, Intermediates.SceneData.InstanceData.LocalToWorld, Intermediates.SceneData.InstanceData.InvNonUniformScale);
+	return TransformGPUTessellationNormal(Intermediates.Normal, Intermediates.SceneData.InstanceData.WorldToLocal);
 }
 
 float3 VertexFactoryGetWorldNormal(FVertexFactoryInterpolantsVSToPS Interpolants)
@@ -485,7 +494,7 @@ float3 VertexFactoryGetWorldNormal(FPositionAndNormalOnlyVertexFactoryInput Inpu
 {
 	FSceneDataIntermediates SceneData = VF_GPUSCENE_GET_INTERMEDIATES(Input);
 	float3 LocalNormal = SafeNormalizeUpVector(NormalBuffer[Input.VertexId]);
-	return RotateLocalToWorld(LocalNormal, SceneData.InstanceData.LocalToWorld, SceneData.InstanceData.InvNonUniformScale);
+	return TransformGPUTessellationNormal(LocalNormal, SceneData.InstanceData.WorldToLocal);
 }
 
 // Previous frame position (for velocity rendering) - no motion for static mesh

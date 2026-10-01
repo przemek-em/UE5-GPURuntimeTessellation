@@ -36,6 +36,10 @@ namespace GPUOceanFFT
 		FRDGTextureRef SpectrumHeight = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.SpectrumHeight"));
 		FRDGTextureRef SpectrumDisplacementX = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.SpectrumDisplacementX"));
 		FRDGTextureRef SpectrumDisplacementY = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.SpectrumDisplacementY"));
+		// Separate row outputs avoid optional RG32F typed UAV loads and SRV/UAV aliasing.
+		FRDGTextureRef RowHeight = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.RowHeight"));
+		FRDGTextureRef RowDisplacementX = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.RowDisplacementX"));
+		FRDGTextureRef RowDisplacementY = GraphBuilder.CreateTexture(SpectrumDesc, TEXT("GPUOceanFFT.RowDisplacementY"));
 
 		// Final displacement map: RGBA32F NxN. XY are horizontal displacement in local space,
 		// Z is vertical height, W is reserved for future foam/Jacobian work.
@@ -81,9 +85,12 @@ namespace GPUOceanFFT
 		// PASS 2 - 1D Inverse FFT along X (rows)
 		{
 			auto* P = GraphBuilder.AllocParameters<FGPUOceanFFTRowCS::FParameters>();
-			P->SpectrumHeightInOut = GraphBuilder.CreateUAV(SpectrumHeight);
-			P->SpectrumDisplacementXInOut = GraphBuilder.CreateUAV(SpectrumDisplacementX);
-			P->SpectrumDisplacementYInOut = GraphBuilder.CreateUAV(SpectrumDisplacementY);
+			P->SpectrumHeightIn = SpectrumHeight;
+			P->SpectrumDisplacementXIn = SpectrumDisplacementX;
+			P->SpectrumDisplacementYIn = SpectrumDisplacementY;
+			P->SpectrumHeightOut = GraphBuilder.CreateUAV(RowHeight);
+			P->SpectrumDisplacementXOut = GraphBuilder.CreateUAV(RowDisplacementX);
+			P->SpectrumDisplacementYOut = GraphBuilder.CreateUAV(RowDisplacementY);
 			TShaderMapRef<FGPUOceanFFTRowCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 			FComputeShaderUtils::AddPass(
 				GraphBuilder, RDG_EVENT_NAME("GPUOceanFFT.RowIFFT"),
@@ -93,9 +100,9 @@ namespace GPUOceanFFT
 		// PASS 3 - 1D Inverse FFT along Y (columns) -> writes Heightmap
 		{
 			auto* P = GraphBuilder.AllocParameters<FGPUOceanFFTColCS::FParameters>();
-			P->SpectrumHeightInOut = GraphBuilder.CreateUAV(SpectrumHeight);
-			P->SpectrumDisplacementXInOut = GraphBuilder.CreateUAV(SpectrumDisplacementX);
-			P->SpectrumDisplacementYInOut = GraphBuilder.CreateUAV(SpectrumDisplacementY);
+			P->SpectrumHeightIn = RowHeight;
+			P->SpectrumDisplacementXIn = RowDisplacementX;
+			P->SpectrumDisplacementYIn = RowDisplacementY;
 			P->DisplacementMapOut = GraphBuilder.CreateUAV(DisplacementMap);
 			TShaderMapRef<FGPUOceanFFTColCS> Shader(GetGlobalShaderMap(GMaxRHIFeatureLevel));
 			FComputeShaderUtils::AddPass(

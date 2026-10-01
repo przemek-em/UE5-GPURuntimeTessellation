@@ -1,6 +1,7 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 
 #include "GPUTessellationSceneProxy.h"
+#include "GPUTessellationRendering.h"
 #include "GPUTessellationComponent.h"
 #include "GPUTessellationMeshBuilder.h"
 #include "GPUTessellationVertexFactory.h"
@@ -338,10 +339,9 @@ FGPUTessellationSceneProxy::FGPUTessellationSceneProxy(UGPUTessellationComponent
 	}
 	// Set primitive properties
 	bWillEverBeLit = true;
-	bCastDynamicShadow = true;
 	bCastStaticShadow = false;
-	bAffectDynamicIndirectLighting = true;
-	bAffectDistanceFieldLighting = true;
+	// Generated geometry has no FDistanceFieldVolumeData to register with the scene.
+	bAffectDistanceFieldLighting = false;
 	
 	if (bEnableDebugLogging)
 	{
@@ -512,16 +512,7 @@ void FGPUTessellationSceneProxy::RenderSingleMesh(
 			const FBoxSphereBounds ComponentWorldBounds = ComponentLocalBounds.TransformBy(FTransform(GetLocalToWorld()));
 
 			FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-			DynamicPrimitiveUniformBuffer.Set(
-				Collector.GetRHICommandList(),
-				GetLocalToWorld(),
-				GetLocalToWorld(),
-				ComponentWorldBounds,
-				ComponentLocalBounds,
-				false,
-				false,
-				false
-			);
+			SetGPUTessellationPrimitiveUniformBuffer(*this, Collector, ComponentWorldBounds, ComponentLocalBounds, DynamicPrimitiveUniformBuffer);
 			BatchElement.PrimitiveUniformBufferResource = &DynamicPrimitiveUniformBuffer.UniformBuffer;
 			BatchElement.PrimitiveIdMode = PrimID_ForceZero;
 
@@ -595,7 +586,7 @@ void FGPUTessellationSceneProxy::RenderPatches(
 				const FGPUTessellationPatchInfo& PatchInfo = GPUPatchBuffers.PatchInfo[PatchIndex];
 				
 				// Skip culled patches (legacy regen-time culling)
-				if (!PatchInfo.bVisible)
+				if (!bIsShadowView && !PatchInfo.bVisible)
 				{
 					if (bEnableDebugLogging)
 					{
@@ -604,12 +595,12 @@ void FGPUTessellationSceneProxy::RenderPatches(
 					continue;
 				}
 
-				// Per-frame frustum reject against this view (FIX CRITICAL #5)
+				// Keep offscreen casters in the light's volume; camera culling loses their shadows.
 				if (bDoFrustumCull)
 				{
 					const FVector PatchCenter = PatchInfo.WorldBounds.GetCenter();
 					const FVector PatchExtent = PatchInfo.WorldBounds.GetExtent();
-					if (!View->ViewFrustum.IntersectBox(PatchCenter, PatchExtent))
+					if (!IsGPUTessellationBoxVisible(*View, PatchCenter, PatchExtent))
 					{
 						continue;
 					}
@@ -691,16 +682,7 @@ void FGPUTessellationSceneProxy::RenderPatches(
 				const FBoxSphereBounds ComponentWorldBounds = ComponentLocalBounds.TransformBy(FTransform(GetLocalToWorld()));
 
 				FDynamicPrimitiveUniformBuffer& DynamicPrimitiveUniformBuffer = Collector.AllocateOneFrameResource<FDynamicPrimitiveUniformBuffer>();
-				DynamicPrimitiveUniformBuffer.Set(
-					Collector.GetRHICommandList(),
-					GetLocalToWorld(),        // LocalToWorld
-					GetLocalToWorld(),        // PreviousLocalToWorld (same for now)
-					ComponentWorldBounds,    // WorldBounds - stable for material object data
-					ComponentLocalBounds,    // LocalBounds - stable for material object data
-					false,                   // bReceivesDecals
-					false,                   // bHasPrecomputedVolumetricLightmap
-					false                    // bOutputVelocity
-				);
+				SetGPUTessellationPrimitiveUniformBuffer(*this, Collector, ComponentWorldBounds, ComponentLocalBounds, DynamicPrimitiveUniformBuffer);
 				BatchElement.PrimitiveUniformBufferResource = &DynamicPrimitiveUniformBuffer.UniformBuffer;
 				// The VF reads transform data from the primitive uniform buffer directly.
 				// Setup mesh batch
@@ -1110,9 +1092,8 @@ FPrimitiveViewRelevance FGPUTessellationSceneProxy::GetViewRelevance(const FScen
 	// rasterizer. Velocity relevance is needed for TSR/TAA temporal stability and
 	// for VSM dynamic-page invalidation when the mesh moves.
 	Result.bRenderInDepthPass = ShouldRenderInDepthPass();
-	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
-
 	MaterialRelevance.SetPrimitiveViewRelevance(Result);
+	Result.bVelocityRelevance = DrawsVelocity() && Result.bOpaque && Result.bRenderInMainPass;
 
 	if (bEnableDebugLogging)
 	{
